@@ -55,8 +55,9 @@ if _REPO_ROOT not in sys.path:
 
 NONCE_LEN = 32
 
-# Azure SEV-SNP CVMs are Milan-based today.
-SNP_PROCESSOR = os.environ.get("SNP_PROCESSOR", "milan")
+# None: detect the EPYC generation from /proc/cpuinfo (Milan vs Genoa), so the fetched
+# ASK/ARK matches the VCEK; SNP_PROCESSOR overrides it.
+SNP_PROCESSOR = os.environ.get("SNP_PROCESSOR") or None
 
 # When set (e.g. for local dry-runs without an SNP CVM), return a stub bundle
 # instead of invoking the real attestation pipeline.
