@@ -55,11 +55,9 @@ access.
      of the testbed, and the submission tells the AEC chairs about this.
 
    We add the key to the evaluator account on the client VM, we open SSH to
-   your range, and we reply with the address of the client VM, a read-only
-   access token for the repository, and the clone command.
-2. Get the code: this repository is private. Our reply gives a read-only
-   access token for the repository and the clone command (read access to this repository only; it expires on
-   31 October 2026). The client VM has the same version in `~/Janus`.
+   your range, and we reply with the address of the client VM.
+2. Get the code: clone this public repository at tag `atc26-ae` (README,
+   Step 3). The client VM has the same version in `~/Janus`.
 3. Connect: `ssh ae@<client-vm-address>`. The repository is at `~/Janus`.
 4. Run `eval/ae/check_testbed.sh` (or `eval/ae/ae.py -m test`).
 

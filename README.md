@@ -163,10 +163,9 @@ Post two items in the HotCRP artifact thread:
    not want to reveal your network, connect through a VPN or a small cloud
    jump host and give us that range. We can change the range at any time.
 
-We reply in the thread with the address of the client VM, a read-only access
-token for this repository, and the clone command. Only one evaluator can use
-the testbed at a time, so please also tell us when you plan to run. Half a day is
-enough for everything. See `docs/ACCESS.md` for details.
+We reply in the thread with the address of the client VM. Only one evaluator
+can use the testbed at a time, so please also tell us when you plan to run.
+Half a day is enough for everything. See `docs/ACCESS.md` for details.
 
 ### Step 2: Configure SSH
 
@@ -182,14 +181,11 @@ Host janus-client
 
 ### Step 3: Get the code and check the testbed
 
-This repository is private. Our reply in the HotCRP thread (Step 1) gives a
-read-only access token and the clone command. Run it on your computer. The last command removes the token
-from your copy:
+Clone this repository on your computer, at the evaluated tag:
 
 ```sh
-git clone --branch atc26-ae https://ae:<TOKEN>@github.com/jaden-qi-guo/Janus-ATC26-Artifacts.git janus-artifact
+git clone --branch atc26-ae https://github.com/Nokia-Bell-Labs/load-balancing-for-confidential-cloud-services.git janus-artifact
 cd janus-artifact
-git remote set-url origin https://github.com/jaden-qi-guo/Janus-ATC26-Artifacts.git
 ```
 
 If the clone does not work, copy the same version from the client VM:

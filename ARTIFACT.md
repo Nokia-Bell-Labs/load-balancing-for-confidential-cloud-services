@@ -37,11 +37,9 @@ The artifact contains:
 
 ## Badges sought
 
-- **Available**: this repository, at tag `atc26-ae`, under the BSD 3-Clause
-  Clear License (Nokia Bell Labs). This repository is private; we give a
-  read-only access token with the testbed access. Upon Nokia's internal
-  approval, we will share a separate public GitHub repository with the same
-  artifacts, and deposit that version on Zenodo with a DOI.
+- **Available**: this public repository, at tag `atc26-ae`, under the BSD
+  3-Clause Clear License (Nokia Bell Labs). We will deposit the same version
+  on Zenodo with a DOI.
 - **Functional**: the system builds and runs end to end on the provided
   testbed.
 - **Results Reproduced**: every client-driven experiment re-runs on the testbed
