@@ -1,0 +1,54 @@
+# © 2026 Nokia
+# Licensed under the BSD 3-Clause Clear License
+# SPDX-License-Identifier: BSD-3-Clause-Clear
+
+# Run parameters.  Anything that affects measurement semantics lives here
+# (not in client code) so a result is interpretable from the CSV + this file.
+
+schema_version: 1
+
+# 30 warmup attempts are discarded so any one-time init (DNS, ARP, conntrack,
+# JIT warm-up) is paid before the measured attempts.  n_measure raised to 200
+# so the p90/p99 tail is stable across the RTT series (earlier RTT-40/80/160
+# runs had only n=40, giving noisy, non-monotonic p90 totals).
+n_warmup: 30
+n_measure: 200
+
+# Percentiles reported by analysis/aggregate.py.  Add more if needed; never
+# remove published ones without a schema_version bump.
+percentiles: [50, 95, 99]
+
+# warm = persistent JWKS cache within a run (the headline path).
+# cold = cache wiped before every attempt, so every attempt pays the JWKS RTT.
+# The Makefile runs both, into separate CSVs.
+cache_policy: warm
+
+http_timeout_s: 30
+
+# Small static GET on the data path.  Connection: close forces a fresh
+# connection per attempt (no keepalive amortization).
+http_request_template: |
+  GET {path} HTTP/1.1
+  Host: {host}
+  User-Agent: janus-client/1
+  Connection: close
+  Accept: */*
+
+# Quote-generation policy for RA+TLS / HTTPA2 baselines.  fresh_per_connection
+# is paper-faithful: every attempt generates a new hardware quote on the
+# server side, matching how the published designs intend to operate.  Change
+# only with a separate paragraph in the eval section explaining why.
+quote_policy: fresh_per_connection
+
+# Scalability mode (runner.py --mode scale): open-loop driver with Poisson
+# arrivals.  For each rate, schedule arrivals at lambda for per_step_warmup_s
+# (discarded) then per_step_window_s (measured), with up to max_workers
+# threads servicing the queue.  ``wait_ms`` (queue time at the client)
+# is recorded per attempt so the response-time curve at saturation is
+# captured rather than hidden by closed-loop coordination effects.
+scale:
+  rates_rps: [50, 100, 200, 400, 600, 800]
+  per_step_warmup_s: 5
+  per_step_window_s: 20
+  max_workers: 64
+  seed: 17

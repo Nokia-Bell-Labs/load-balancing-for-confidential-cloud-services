@@ -1,0 +1,14 @@
+# © 2026 Nokia
+# Licensed under the BSD 3-Clause Clear License
+# SPDX-License-Identifier: BSD-3-Clause-Clear
+
+# Client-side Python dependencies of the measurement scripts, the application
+# benches and the figure generators; exact versions of the validated client
+# (deploy/client_setup.sh installs these).
+cryptography==50.0.1
+requests==2.34.2
+urllib3==2.8.0
+pyyaml==5.4.1
+selenium==4.49.0
+matplotlib==3.10.9
+numpy==2.2.6

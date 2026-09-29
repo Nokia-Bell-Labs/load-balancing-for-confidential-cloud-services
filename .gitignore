@@ -1,0 +1,85 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+env/
+
+# Secrets, keys, certificates — NEVER commit (deployment/test keys live in the
+# working tree so the testbed runs, but they are generated per-deployment:
+#   ca/pebble/ca_certs/generate_ca_certificates.sh, gramine key gen, etc.)
+*.pem
+*.key
+*.crt
+*.csr
+*.p12
+*.pfx
+*.pub
+# Pebble's upstream test certs are part of the vendored Pebble source
+!ca/pebble/test/certs/**
+**/sealed/
+**/sealed.bak*/
+**/sealed_bak*/
+gramine/keys/
+janus/frontend/azure_config.env
+bench/staging/.storage_account
+
+# Build artifacts (regenerable; see baselines/patches/README.md for pins)
+baselines/ratls-external/
+baselines/python-ratls/
+baselines/python-bssl/
+baselines/boringssl-install/
+baselines/ratls/server/build/
+baselines/ratls/server/*.so
+ca/pebble/pebble
+janus/backend/dc_proxy/dc_proxy
+janus/backend/dc_proxy/boringssl/
+janus/backend/snpguest/
+apps/microservice_app/DeathStarBench/
+janus/client/native/client
+janus/client/native/nss_dc_helper
+janus/client/native/nss_dc_helper_dbg
+*.so
+*.o
+*.manifest
+*.manifest.sgx
+*.sig
+*.token
+*.zip
+*.xpi
+node_modules/
+
+# External upstream clones (documented in docs/DEPENDENCIES.md)
+
+# Archived/backup material — kept locally for provenance, never pushed.
+# Superseded datastore snapshots are moved here instead of deleted.
+
+# Logs / scratch
+*.log
+# ...but raw measurement logs in the reproducibility store ARE data — keep them
+!plotting/**/*.log
+*.orig
+*.orig.*
+*.bak
+*.old
+*.swp
+.DS_Store
+.vscode/
+.idea/
+fetched_homepage.html
+ca/pebble/
+
+# Non-system material — kept local, never tracked (prior implementation,
+# write-ups, paper sources, external deps, machine scratch, and secrets).
+
+# evaluator fetches (ae-remote.sh fetch/figures) land next to the driver when run from the checkout
+janus-ae-results/
+ae-results/
+
+# generated figures: the paper mode / make_figures.sh rebuild them from the shipped data into a copy under the results directory
+plotting/figures/
+plotting/**/*.pdf
+plotting/**/*.png
+eval/analysis/results/

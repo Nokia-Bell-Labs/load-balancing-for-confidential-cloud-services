@@ -1,0 +1,28 @@
+{
+  "name": "sgx-attestation-extension",
+  "version": "1.0.0",
+  "description": "Browser extension for Intel SGX attestation verification",
+  "scripts": {
+    "lint": "eslint src",
+    "package": "web-ext build --source-dir=. --artifacts-dir=dist --overwrite-dest",
+    "start:firefox": "web-ext run --source-dir=. --firefox-profile=dev-profile",
+    "start:chromium": "web-ext run --source-dir=. --target=chromium"
+  },
+  "keywords": [
+    "sgx",
+    "attestation",
+    "security",
+    "tee",
+    "intel"
+  ],
+  "author": "The Janus authors",
+  "license": "BSD-3-Clause-Clear",
+  "devDependencies": {
+    "eslint": "^8.0.0",
+    "web-ext": "^7.0.0"
+  },
+  "dependencies": {
+    "asn1js": "^3.0.6",
+    "pkijs": "^3.3.3"
+  }
+}

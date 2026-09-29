@@ -1,0 +1,18 @@
+# © 2026 Nokia
+# Licensed under the BSD 3-Clause Clear License
+# SPDX-License-Identifier: BSD-3-Clause-Clear
+
+azure-mgmt-resource==23.3.0
+azure-mgmt-compute==34.1.0
+azure-mgmt-network==28.1.0
+azure-identity==1.21.0
+azure-security-attestation==1.0.0
+cryptography==45.0.7
+flask==3.1.2
+paramiko==3.5.1
+requests==2.32.3
+urllib3==1.26.5
+acme==2.11.0
+josepy==1.14.0
+python-dotenv==1.1.0
+six

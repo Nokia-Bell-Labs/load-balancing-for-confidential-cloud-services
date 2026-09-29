@@ -1,0 +1,54 @@
+<!--
+  © 2026 Nokia
+  Licensed under the BSD 3-Clause Clear License
+  SPDX-License-Identifier: BSD-3-Clause-Clear
+-->
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Janus Back-end Server</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>🔒 Janus Back-end Server Running in Confidential VM</h1>
+
+        <div class="info-box">
+            <h2>Server Information</h2>
+            <p><strong>Status:</strong> Running in Confidential VM</p>
+            <p><strong>CVM Type:</strong> {{CVM_TYPE}}</p>
+            <p><strong>CVM ID:</strong> <code>{{CVM_ID}}…</code></p>
+            <p><strong>Certificate Expires:</strong> {{CERT_EXPIRES}}</p>
+        </div>
+
+        <div class="info-box">
+            <h2>Trust Chain</h2>
+            <p>This server's TLS certificate was issued by the <strong>Janus frontend's CA</strong>,
+               whose private key resides in an Intel SGX enclave.</p>
+            <ol>
+                <li>The frontend's SGX enclave was attested by Azure MAA — its evidence is embedded in the frontend's TLS certificate</li>
+                <li>The frontend verified this CVM's SNP/TDX attestation evidence at registration before issuing its Delegated Credential</li>
+                <li>Clients verify the frontend's enclave, then trust the credentials it signs</li>
+            </ol>
+        </div>
+
+        <div class="info-box">
+            <h2>Verification</h2>
+            <p>To verify this back-end in redirection mode:</p>
+            <ol>
+                <li>Connect to the frontend and verify its SGX attestation</li>
+                <li>Validate the frontend's certificate chain and AS-signed JWT</li>
+                <li>Connect directly to this back-end: its RFC 9345 Delegated Credential is signed by the frontend's key</li>
+            </ol>
+            <p>Use the Python client: <code>python3 -m janus.client.client --backend HOST:PORT</code></p>
+        </div>
+
+        <footer>
+            <p>Janus — decoupling attestation from TLS for confidential cloud services</p>
+        </footer>
+    </div>
+</body>
+</html>

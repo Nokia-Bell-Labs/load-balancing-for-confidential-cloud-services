@@ -1,0 +1,13 @@
+diff --git a/src/ratls/Makefile b/src/ratls/Makefile
+index 1184399..926d738 100644
+--- a/src/ratls/Makefile
++++ b/src/ratls/Makefile
+@@ -11,7 +11,7 @@ TARGETS     = $(TEST_SERVER) $(DEMO_SERVER) $(TEST_CLIENT) $(DEMO_CLIENT) $(PROX
+ TESTBED_OBJS        = expected.o benchmark.o demo.o debug.o
+ CCA_OBJS            = ratls-cca.o ratls-cca-internal.o
+ TPM2_OBJS           = ratls-tpm2.o
+-SEV_OBJS            = ratls-sev.o
++SEV_OBJS            = # ratls-sev.o - Disabled for Intel SGX systems
+ M3_OBJS             = ratls-m3.o
+ CLIENT_SERVER_OBJS  = ratls.o plugin.o $(TPM2_OBJS) $(SEV_OBJS) $(M3_OBJS) $(CCA_OBJS) $(TESTBED_OBJS)
+ $(TEST_SERVER)_OBJS = server.o $(CLIENT_SERVER_OBJS)

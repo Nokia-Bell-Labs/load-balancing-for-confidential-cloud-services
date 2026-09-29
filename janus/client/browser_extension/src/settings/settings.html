@@ -1,0 +1,44 @@
+<!--
+  © 2026 Nokia
+  Licensed under the BSD 3-Clause Clear License
+  SPDX-License-Identifier: BSD-3-Clause-Clear
+-->
+
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Janus Extension Settings</title>
+  <style>
+    body { font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+           max-width: 640px; margin: 30px auto; color: #222; }
+    h1 { font-size: 20px; } label { display:block; margin: 16px 0 4px; font-weight: 600; }
+    input, textarea { width: 100%; box-sizing: border-box; padding: 8px;
+           font-family: monospace; font-size: 13px; }
+    .hint { color:#666; font-size:12px; margin-top:2px; }
+    button { margin-top: 20px; background:#1a73e8; color:#fff; border:none;
+             padding:10px 20px; border-radius:6px; font-size:14px; cursor:pointer; }
+    #saved { color:#1e8e3e; margin-left:12px; }
+  </style>
+</head>
+<body>
+  <h1>🛡️ Janus Attestation — Settings</h1>
+
+  <label>Enforced hosts</label>
+  <textarea id="enforcedHosts" rows="3"></textarea>
+  <div class="hint">One <code>host</code> or <code>host:port</code> per line. On these
+    origins a missing or invalid attestation is <b>blocked</b>. Empty ⇒ monitor only.</div>
+
+  <label>Allowed AS (MAA) issuers</label>
+  <textarea id="allowedIssuers" rows="2"></textarea>
+  <div class="hint">One issuer URL prefix per line; the JWT's <code>iss</code> must match one.</div>
+
+  <label>Expected MRENCLAVE (optional)</label>
+  <input id="expectedMrenclave" type="text">
+  <label>Expected MRSIGNER (optional)</label>
+  <input id="expectedMrsigner" type="text">
+
+  <div><button id="save">Save</button><span id="saved"></span></div>
+  <script src="settings.js"></script>
+</body>
+</html>

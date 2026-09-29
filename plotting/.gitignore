@@ -1,0 +1,11 @@
+# Generators write PNG/PDF next to their data when run. The canonical,
+# paper-named copies are collected into figures/ by regenerate.py and are the
+# only rendered figures tracked in this datastore. Ignore the in-dir scratch.
+bench_figures/*.png
+bench_figures/*.pdf
+scalability_capped/*.png
+scalability_capped/*.pdf
+proxy_overhead/*.png
+proxy_overhead/*.pdf
+data_volume/*.png
+data_volume/*.pdf

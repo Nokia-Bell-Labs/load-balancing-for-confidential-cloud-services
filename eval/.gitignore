@@ -1,0 +1,30 @@
+# Raw per-attempt measurement data is large (~287 MB) and lives on the testbed
+# VMs; only the small files the paper figures are generated from are tracked,
+# so `analysis/paper_figures.py` reproduces every figure from a clean checkout.
+data/*
+!data/.gitkeep
+
+# Application-figure inputs (summary + raw, all small).
+!data/apps/
+data/apps/*
+!data/apps/*.csv
+
+# Latency-vs-RTT + breakdown figure inputs.
+!data/rtt-*/
+data/rtt-*/*
+!data/rtt-*/*_warm.csv
+!data/rtt-*/*_breakdown.csv
+
+# Scalability figure inputs (aggregated per-step, small).
+!data/fin/
+data/fin/*
+!data/fin/*_scale_warm_steps.csv
+!data/mb-N*/
+data/mb-N*/*
+!data/mb-N*/*_scale_warm_steps.csv
+
+results/*
+!results/.gitkeep
+**/__pycache__/
+**/*.pyc
+**/jwks_cache/

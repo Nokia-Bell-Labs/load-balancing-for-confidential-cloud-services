@@ -1,0 +1,15 @@
+diff --git a/ssl/extensions.cc b/ssl/extensions.cc
+index 84c80ab..920a031 100644
+--- a/ssl/extensions.cc
++++ b/ssl/extensions.cc
+@@ -3138,6 +3138,10 @@ static bool ext_quic_transport_params_add_serverhello_legacy(SSL_HANDSHAKE *hs,
+ static bool ext_delegated_credential_add_clienthello(
+     const SSL_HANDSHAKE *hs, CBB *out, CBB *out_compressible,
+     ssl_client_hello_type_t type) {
++  // BoringSSL only implements the server side of DCs. Advertising client
++  // support would cause the handshake to fail because the client cannot
++  // parse the DC from the server's Certificate message or use the DC key
++  // to verify CertificateVerify.
+   return true;
+ }
+ 

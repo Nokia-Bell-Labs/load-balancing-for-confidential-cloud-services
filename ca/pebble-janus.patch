@@ -1,0 +1,1142 @@
+diff --git a/ca/ca.go b/ca/ca.go
+index e4489e1..b60c873 100644
+--- a/ca/ca.go
++++ b/ca/ca.go
+@@ -12,12 +12,14 @@ import (
+ 	"crypto/x509/pkix"
+ 	"encoding/asn1"
+ 	"encoding/hex"
++	"encoding/pem"
+ 	"errors"
+ 	"fmt"
+ 	"log"
+ 	"math"
+ 	"math/big"
+ 	"net"
++	"os"
+ 	"strings"
+ 	"time"
+ 
+@@ -123,6 +125,124 @@ func makeKey(keyAlg string) (crypto.Signer, []byte, error) {
+ 	return key, ski, nil
+ }
+ 
++// loadPersistentCA loads a persistent CA certificate and private key from PEM files
++func loadPersistentCA(certPath, keyPath string) (*issuer, error) {
++	// Read certificate
++	certPEM, err := os.ReadFile(certPath)
++	if err != nil {
++		return nil, fmt.Errorf("failed to read certificate from %s: %w", certPath, err)
++	}
++	
++	block, _ := pem.Decode(certPEM)
++	if block == nil {
++		return nil, fmt.Errorf("failed to decode PEM block from %s", certPath)
++	}
++	
++	cert, err := x509.ParseCertificate(block.Bytes)
++	if err != nil {
++		return nil, fmt.Errorf("failed to parse certificate: %w", err)
++	}
++	
++	// Read private key
++	keyPEM, err := os.ReadFile(keyPath)
++	if err != nil {
++		return nil, fmt.Errorf("failed to read private key from %s: %w", keyPath, err)
++	}
++	
++	keyBlock, _ := pem.Decode(keyPEM)
++	if keyBlock == nil {
++		return nil, fmt.Errorf("failed to decode PEM block from %s", keyPath)
++	}
++	
++	// Try parsing as different key types
++	var key crypto.Signer
++	if parsedKey, err := x509.ParsePKCS8PrivateKey(keyBlock.Bytes); err == nil {
++		key, _ = parsedKey.(crypto.Signer)
++	} else if parsedKey, err := x509.ParseECPrivateKey(keyBlock.Bytes); err == nil {
++		key = parsedKey
++	} else if parsedKey, err := x509.ParsePKCS1PrivateKey(keyBlock.Bytes); err == nil {
++		key = parsedKey
++	} else {
++		return nil, fmt.Errorf("failed to parse private key from %s", keyPath)
++	}
++	
++	if key == nil {
++		return nil, fmt.Errorf("private key is not a crypto.Signer")
++	}
++	
++	// Create core.Certificate wrapper
++	serial := hex.EncodeToString(cert.SerialNumber.Bytes())
++	coreCert := &core.Certificate{
++		ID:   serial,
++		Cert: cert,
++		DER:  cert.Raw,
++	}
++	
++	return &issuer{
++		key:  key,
++		cert: coreCert,
++	}, nil
++}
++
++// loadPersistentChain loads a persistent CA chain from disk
++func (ca *CAImpl) loadPersistentChain() (*chain, error) {
++	// Username-agnostic: honor PEBBLE_CA_CERTS_DIR, else $HOME/pebble/ca_certs
++	// (the frontend container installs the chain under the app user's home).
++	basePath := os.Getenv("PEBBLE_CA_CERTS_DIR")
++	if basePath == "" {
++		if home := os.Getenv("HOME"); home != "" {
++			basePath = home + "/pebble/ca_certs"
++		} else {
++			basePath = "ca_certs"
++		}
++	}
++
++	// Load root CA
++	root, err := loadPersistentCA(
++		fmt.Sprintf("%s/root-ca.pem", basePath),
++		fmt.Sprintf("%s/root-ca-key.pem", basePath),
++	)
++	if err != nil {
++		return nil, fmt.Errorf("failed to load root CA: %w", err)
++	}
++	ca.log.Printf("✓ Loaded persistent root CA: %s", root.cert.Cert.Subject.CommonName)
++	
++	// Load intermediate CA
++	intermediate, err := loadPersistentCA(
++		fmt.Sprintf("%s/intermediate-ca.pem", basePath),
++		fmt.Sprintf("%s/intermediate-ca-key.pem", basePath),
++	)
++	if err != nil {
++		return nil, fmt.Errorf("failed to load intermediate CA: %w", err)
++	}
++	ca.log.Printf("✓ Loaded persistent intermediate CA: %s", intermediate.cert.Cert.Subject.CommonName)
++	
++	// Verify intermediate is signed by root
++	if err := intermediate.cert.Cert.CheckSignatureFrom(root.cert.Cert); err != nil {
++		return nil, fmt.Errorf("intermediate CA is not signed by root CA: %w", err)
++	}
++	ca.log.Printf("✓ Verified intermediate CA is signed by root CA")
++	
++	// Set up issuer chain for intermediate
++	intermediate.cert.IssuerChains = make([][]*core.Certificate, 1)
++	intermediate.cert.IssuerChains[0] = []*core.Certificate{root.cert}
++	
++	// Add certificates to database
++	_, err = ca.db.AddCertificate(root.cert)
++	if err != nil {
++		return nil, fmt.Errorf("failed to add root CA to database: %w", err)
++	}
++	_, err = ca.db.AddCertificate(intermediate.cert)
++	if err != nil {
++		return nil, fmt.Errorf("failed to add intermediate CA to database: %w", err)
++	}
++	
++	return &chain{
++		root:          root,
++		intermediates: []*issuer{intermediate},
++	}, nil
++}
++
+ func (ca *CAImpl) makeCACert(
+ 	subjectKey crypto.Signer,
+ 	subject pkix.Name,
+@@ -385,16 +505,28 @@ func New(log *log.Logger, db *db.MemoryStore, ocspResponderURL string, keyAlg st
+ 		ca.log.Printf("Setting OCSP responder URL for issued certificates to %q", ca.ocspResponderURL)
+ 	}
+ 
+-	intermediateSubject := pkix.Name{
+-		CommonName: intermediateCAPrefix + hex.EncodeToString(makeSerial().Bytes()[:3]),
+-	}
+-	intermediateKey, subjectKeyID, err := makeKey(keyAlg)
++	// Try to load persistent CA certificates first
++	persistentChain, err := ca.loadPersistentChain()
+ 	if err != nil {
+-		panic(fmt.Sprintf("Error creating new intermediate private key: %s", err.Error()))
+-	}
+-	ca.chains = make([]*chain, 1+alternateRoots)
+-	for i := 0; i < len(ca.chains); i++ {
+-		ca.chains[i] = ca.newChain(intermediateKey, intermediateSubject, subjectKeyID, chainLength, keyAlg)
++		// Fallback to generating random CA (original behavior)
++		ca.log.Printf("⚠ Could not load persistent CA certificates: %v", err)
++		ca.log.Printf("  Falling back to generating random CA certificates")
++		
++		intermediateSubject := pkix.Name{
++			CommonName: intermediateCAPrefix + hex.EncodeToString(makeSerial().Bytes()[:3]),
++		}
++		intermediateKey, subjectKeyID, err := makeKey(keyAlg)
++		if err != nil {
++			panic(fmt.Sprintf("Error creating new intermediate private key: %s", err.Error()))
++		}
++		ca.chains = make([]*chain, 1+alternateRoots)
++		for i := 0; i < len(ca.chains); i++ {
++			ca.chains[i] = ca.newChain(intermediateKey, intermediateSubject, subjectKeyID, chainLength, keyAlg)
++		}
++	} else {
++		// Use persistent CA
++		ca.log.Printf("✅ Using persistent CA certificates")
++		ca.chains = []*chain{persistentChain}
+ 	}
+ 
+ 	for name, prof := range profiles {
+@@ -418,6 +550,15 @@ var ocspMustStapleExt = pkix.Extension{
+ 	Value: []byte{0x30, 0x03, 0x02, 0x01, 0x05},
+ }
+ 
++// SGX extension OID prefixes: 1.3.6.1.4.1.99999.3.*
++var sgxExtensionOIDPrefixes = []asn1.ObjectIdentifier{
++	{1, 3, 6, 1, 4, 1, 99999, 3}, // Base OID for all SGX extensions
++}
++
++// DelegationUsage extension (RFC 9345): 1.3.6.1.4.1.44363.44
++// Allows certificates to be used for signing Delegated Credentials.
++var delegationUsageOID = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 44363, 44}
++
+ // Returns whether the given extensions array contains an OCSP Must-Staple
+ // extension.
+ func extensionsContainsOCSPMustStaple(extensions []pkix.Extension) bool {
+@@ -429,6 +570,41 @@ func extensionsContainsOCSPMustStaple(extensions []pkix.Extension) bool {
+ 	return false
+ }
+ 
++// Returns whether the given OID matches an allowed SGX extension OID.
++// SGX extensions use OID 1.3.6.1.4.1.99999.3.* (where * can be 1, 2, 3, etc.)
++func isSGXExtension(oid asn1.ObjectIdentifier) bool {
++	for _, prefix := range sgxExtensionOIDPrefixes {
++		if len(oid) == len(prefix)+1 && oidHasPrefix(oid, prefix) {
++			return true
++		}
++	}
++	return false
++}
++
++// Returns whether oid starts with the given prefix.
++func oidHasPrefix(oid, prefix asn1.ObjectIdentifier) bool {
++	if len(oid) < len(prefix) {
++		return false
++	}
++	for i := range prefix {
++		if oid[i] != prefix[i] {
++			return false
++		}
++	}
++	return true
++}
++
++// Returns all SGX extensions from the given extensions array.
++func getSGXExtensions(extensions []pkix.Extension) []pkix.Extension {
++	var sgxExts []pkix.Extension
++	for _, ext := range extensions {
++		if isSGXExtension(ext.Id) {
++			sgxExts = append(sgxExts, ext)
++		}
++	}
++	return sgxExts
++}
++
+ func (ca *CAImpl) CompleteOrder(order *core.Order) {
+ 	// Lock the order for reading
+ 	order.RLock()
+@@ -461,6 +637,27 @@ func (ca *CAImpl) CompleteOrder(order *core.Order) {
+ 		extensions = append(extensions, ocspMustStapleExt)
+ 	}
+ 
++	// Copy SGX attestation extensions from CSR to certificate
++	// SGX extensions use OID 1.3.6.1.4.1.99999.3.*
++	sgxExtensions := getSGXExtensions(order.ParsedCSR.Extensions)
++	if len(sgxExtensions) > 0 {
++		ca.log.Printf("Order %s: Preserving %d SGX extension(s) from CSR", order.ID, len(sgxExtensions))
++		for _, ext := range sgxExtensions {
++			ca.log.Printf("  - SGX Extension OID: %v (length: %d bytes)", ext.Id, len(ext.Value))
++		}
++		extensions = append(extensions, sgxExtensions...)
++	}
++
++	// Copy DelegationUsage extension (RFC 9345) from CSR to certificate
++	// if present.  This enables the cert to sign Delegated Credentials.
++	for _, ext := range order.ParsedCSR.Extensions {
++		if ext.Id.Equal(delegationUsageOID) {
++			ca.log.Printf("Order %s: Preserving DelegationUsage extension from CSR", order.ID)
++			extensions = append(extensions, ext)
++			break
++		}
++	}
++
+ 	// issue a certificate for the csr
+ 	csr := order.ParsedCSR
+ 	cert, err := ca.newCertificate(csr.DNSNames, csr.IPAddresses, csr.PublicKey, order.AccountID, order.NotBefore, order.NotAfter, order.Profile, extensions)
+diff --git a/ca/ca_complete_order_test.go b/ca/ca_complete_order_test.go
+new file mode 100644
+index 0000000..50e40a4
+--- /dev/null
++++ b/ca/ca_complete_order_test.go
+@@ -0,0 +1,303 @@
++package ca
++
++import (
++	"crypto/ecdsa"
++	"crypto/elliptic"
++	"crypto/rand"
++	"crypto/x509"
++	"crypto/x509/pkix"
++	"encoding/asn1"
++	"log"
++	"os"
++	"strings"
++	"testing"
++
++	"github.com/letsencrypt/pebble/v2/acme"
++	"github.com/letsencrypt/pebble/v2/core"
++	"github.com/letsencrypt/pebble/v2/db"
++)
++
++// TestCompleteOrderWithSGXExtension tests the ACTUAL CompleteOrder() flow
++// This is what happens when a real ACME client submits a CSR with SGX extensions
++func TestCompleteOrderWithSGXExtension(t *testing.T) {
++	t.Log(strings.Repeat("=", 60))
++	t.Log("CompleteOrder() Integration Test - REAL ACME FLOW")
++	t.Log(strings.Repeat("=", 60))
++
++	// 1. Setup CA
++	t.Log("\n[1/7] Setting up Pebble CA...")
++	logger := log.New(os.Stdout, "PEBBLE CA: ", log.LstdFlags)
++	testDB := db.NewMemoryStore()
++
++	ca := New(logger, testDB, "", "ecdsa", 0, 1, map[string]Profile{
++		"default": {
++			Description:       "Test profile",
++			PromoteCommonName: false,
++			ValidityPeriod:    7776000,
++		},
++	})
++	t.Log("✓ Pebble CA initialized with root and intermediate certificates")
++
++	// 2. Generate keypair
++	t.Log("\n[2/7] Generating client keypair...")
++	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
++	if err != nil {
++		t.Fatalf("Failed to generate key: %v", err)
++	}
++	t.Log("✓ Client keypair generated")
++
++	// 3. Create mock SGX quote (realistic size)
++	t.Log("\n[3/7] Creating mock SGX quote...")
++	mockSGXQuote := make([]byte, 4800) // Realistic SGX DCAP quote size
++	_, err = rand.Read(mockSGXQuote)
++	if err != nil {
++		t.Fatalf("Failed to generate mock quote: %v", err)
++	}
++	t.Logf("✓ Mock SGX quote created (%d bytes)", len(mockSGXQuote))
++
++	// 4. Create CSR with SGX extension
++	t.Log("\n[4/7] Client creating CSR with SGX extension...")
++	sgxOID := asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 99999, 3, 1}
++
++	csrTemplate := &x509.CertificateRequest{
++		Subject: pkix.Name{
++			CommonName: "sgx-enclave.example.com",
++		},
++		DNSNames: []string{"sgx-enclave.example.com"},
++		ExtraExtensions: []pkix.Extension{
++			{
++				Id:       sgxOID,
++				Critical: false,
++				Value:    mockSGXQuote,
++			},
++		},
++	}
++
++	csrDER, err := x509.CreateCertificateRequest(rand.Reader, csrTemplate, privateKey)
++	if err != nil {
++		t.Fatalf("Failed to create CSR: %v", err)
++	}
++
++	parsedCSR, err := x509.ParseCertificateRequest(csrDER)
++	if err != nil {
++		t.Fatalf("Failed to parse CSR: %v", err)
++	}
++
++	// Verify CSR has SGX extension
++	csrHasSGX := false
++	for _, ext := range parsedCSR.Extensions {
++		if ext.Id.Equal(sgxOID) {
++			csrHasSGX = true
++			t.Logf("✓ CSR contains SGX extension (OID: %v, %d bytes)", ext.Id, len(ext.Value))
++			break
++		}
++	}
++
++	if !csrHasSGX {
++		t.Fatal("CSR does not contain SGX extension")
++	}
++
++	// 5. Create Order object (simulating ACME order)
++	t.Log("\n[5/7] Creating ACME order...")
++	order := &core.Order{
++		ID:        "test-order-sgx-12345",
++		AccountID: "acct-test-123",
++		ParsedCSR: parsedCSR,
++		Order: acme.Order{
++			Status: acme.StatusReady,
++		},
++	}
++	order.Order.Profile = "default" // Set profile name
++
++	// Mark order as ready for processing
++	order.BeganProcessing = true
++
++	// Create mock authorization (valid)
++	mockAuthz := &core.Authorization{}
++	mockAuthz.Status = acme.StatusValid
++	order.AuthorizationObjects = []*core.Authorization{mockAuthz}
++
++	t.Logf("✓ ACME order created (ID: %s)", order.ID)
++	t.Log("  Order status: ready")
++	t.Log("  Authorizations: valid")
++
++	// 6. Call CompleteOrder() - THIS IS THE CRITICAL CODE PATH
++	t.Log("\n[6/7] Calling CompleteOrder() - THE ACTUAL PRODUCTION CODE PATH...")
++	t.Log("  This simulates what happens when an ACME client finalizes an order")
++
++	// THIS IS THE REAL TEST - Does CompleteOrder() preserve SGX extensions?
++	ca.CompleteOrder(order)
++
++	// Check if certificate was issued
++	if order.CertificateObject == nil {
++		t.Fatal("❌ FAILED: CompleteOrder() did not issue a certificate")
++	}
++
++	issuedCert := order.CertificateObject.Cert
++	t.Logf("✓ Certificate issued by CompleteOrder()")
++	t.Logf("  Serial: %s", order.CertificateObject.ID)
++	t.Logf("  Issuer: %s", issuedCert.Issuer.String())
++
++	// 7. Verify SGX extension in issued certificate
++	t.Log("\n[7/7] Verifying SGX extension in final certificate...")
++
++	certHasSGX := false
++	var foundExt pkix.Extension
++
++	for _, ext := range issuedCert.Extensions {
++		if ext.Id.Equal(sgxOID) {
++			certHasSGX = true
++			foundExt = ext
++			break
++		}
++	}
++
++	// Results
++	t.Log("\n" + strings.Repeat("=", 60))
++	t.Log("Test Results - CompleteOrder() Flow")
++	t.Log(strings.Repeat("=", 60))
++
++	if !certHasSGX {
++		t.Error("❌ FAILED: Certificate does NOT contain SGX extension")
++		t.Log("\nExtensions in certificate:")
++		for _, ext := range issuedCert.Extensions {
++			t.Logf("  - OID: %v", ext.Id)
++		}
++		t.Fatal("CompleteOrder() did not preserve SGX extension")
++	}
++
++	// SUCCESS - Verify all details
++	t.Log("\n✅ SUCCESS: CompleteOrder() preserved SGX extension!")
++	t.Logf("   OID: %v", foundExt.Id)
++	t.Logf("   Size: %d bytes", len(foundExt.Value))
++	t.Logf("   Critical: %v", foundExt.Critical)
++
++	// Verify data integrity
++	if len(foundExt.Value) != len(mockSGXQuote) {
++		t.Errorf("Extension size mismatch: expected %d bytes, got %d bytes",
++			len(mockSGXQuote), len(foundExt.Value))
++	} else {
++		t.Log("✓ Extension size matches original SGX quote")
++	}
++
++	// Verify data matches byte-for-byte
++	dataMatches := true
++	for i := 0; i < len(mockSGXQuote); i++ {
++		if i >= len(foundExt.Value) || foundExt.Value[i] != mockSGXQuote[i] {
++			dataMatches = false
++			break
++		}
++	}
++
++	if !dataMatches {
++		t.Error("Extension data does not match original SGX quote")
++	} else {
++		t.Log("✓ Extension data matches original SGX quote byte-for-byte")
++	}
++
++	// Verify certificate details
++	t.Log("\n" + strings.Repeat("-", 60))
++	t.Log("Certificate Details:")
++	t.Log(strings.Repeat("-", 60))
++	t.Log("✓ Subject: " + issuedCert.Subject.String())
++	t.Log("✓ Issuer: " + issuedCert.Issuer.String())
++	t.Logf("✓ Serial: %s", order.CertificateObject.ID)
++	t.Logf("✓ Valid from: %v", issuedCert.NotBefore)
++	t.Logf("✓ Valid until: %v", issuedCert.NotAfter)
++	t.Logf("✓ DNS Names: %v", issuedCert.DNSNames)
++	t.Logf("✓ Total extensions: %d", len(issuedCert.Extensions))
++
++	// List all extensions
++	t.Log("\nAll extensions in certificate:")
++	for i, ext := range issuedCert.Extensions {
++		marker := ""
++		if ext.Id.Equal(sgxOID) {
++			marker = " ← SGX QUOTE"
++		}
++		t.Logf("  %d. OID: %v (%d bytes)%s", i+1, ext.Id, len(ext.Value), marker)
++	}
++
++	t.Log("\n" + strings.Repeat("=", 60))
++	t.Log("🎉 CompleteOrder() Test PASSED!")
++	t.Log(strings.Repeat("=", 60))
++	t.Log("\nThis confirms that when a real ACME client submits a CSR")
++	t.Log("with SGX extensions to Pebble, the signed certificate will")
++	t.Log("contain the SGX quote exactly as submitted.")
++}
++
++// TestCompleteOrderMultipleExtensions tests CompleteOrder with all 3 SGX extensions
++func TestCompleteOrderMultipleExtensions(t *testing.T) {
++	t.Log("Testing CompleteOrder() with multiple SGX extensions...")
++
++	// Setup
++	logger := log.New(os.Stdout, "TEST: ", log.LstdFlags)
++	ca := New(logger, db.NewMemoryStore(), "", "ecdsa", 0, 1, map[string]Profile{
++		"default": {ValidityPeriod: 7776000},
++	})
++
++	privateKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
++
++	// Create CSR with 3 SGX extensions
++	quote := make([]byte, 4500)
++	collateral := make([]byte, 1200)
++	token := make([]byte, 800)
++	rand.Read(quote)
++	rand.Read(collateral)
++	rand.Read(token)
++
++	csrTemplate := &x509.CertificateRequest{
++		Subject:  pkix.Name{CommonName: "multi-sgx.example.com"},
++		DNSNames: []string{"multi-sgx.example.com"},
++		ExtraExtensions: []pkix.Extension{
++			{Id: asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 99999, 3, 1}, Value: quote},
++			{Id: asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 99999, 3, 2}, Value: collateral},
++			{Id: asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 99999, 3, 3}, Value: token},
++		},
++	}
++
++	csrDER, _ := x509.CreateCertificateRequest(rand.Reader, csrTemplate, privateKey)
++	parsedCSR, _ := x509.ParseCertificateRequest(csrDER)
++
++	t.Logf("CSR created with %d extensions", len(parsedCSR.Extensions))
++
++	// Create order
++	order := &core.Order{
++		ID:        "multi-ext-order",
++		AccountID: "acct-multi",
++		ParsedCSR: parsedCSR,
++		Order: acme.Order{
++			Profile: "default",
++		},
++	}
++	order.BeganProcessing = true
++
++	mockAuthz := &core.Authorization{}
++	mockAuthz.Status = acme.StatusValid
++	order.AuthorizationObjects = []*core.Authorization{mockAuthz}
++
++	// Call CompleteOrder
++	t.Log("Calling CompleteOrder()...")
++	ca.CompleteOrder(order)
++
++	if order.CertificateObject == nil {
++		t.Fatal("Certificate not issued")
++	}
++
++	// Count SGX extensions in certificate
++	sgxCount := 0
++	for _, ext := range order.CertificateObject.Cert.Extensions {
++		if isSGXExtension(ext.Id) {
++			sgxCount++
++			t.Logf("✓ Found SGX extension: OID %v (%d bytes)",
++				ext.Id, len(ext.Value))
++		}
++	}
++
++	if sgxCount != 3 {
++		t.Errorf("Expected 3 SGX extensions, got %d", sgxCount)
++	} else {
++		t.Log("✅ All 3 SGX extensions preserved by CompleteOrder()")
++	}
++
++	t.Log("✓ Multi-extension test passed")
++}
+diff --git a/ca/ca_sgx_integration_test.go b/ca/ca_sgx_integration_test.go
+new file mode 100644
+index 0000000..82050c7
+--- /dev/null
++++ b/ca/ca_sgx_integration_test.go
+@@ -0,0 +1,262 @@
++package ca
++
++import (
++	"strings"
++	"crypto/ecdsa"
++	"crypto/elliptic"
++	"crypto/rand"
++	"crypto/x509"
++	"crypto/x509/pkix"
++	"encoding/asn1"
++	"log"
++	"net"
++	"os"
++	"testing"
++
++	"github.com/letsencrypt/pebble/v2/db"
++)
++
++// TestSGXExtensionEndToEnd tests the complete flow:
++// CSR with SGX extension → CompleteOrder → Certificate with SGX extension
++func TestSGXExtensionEndToEnd(t *testing.T) {
++	t.Log(strings.Repeat("=", 60))
++	t.Log("SGX Extension End-to-End Integration Test")
++	t.Log(strings.Repeat("=", 60))
++
++	// 1. Setup CA
++	t.Log("\n[1/6] Setting up test CA...")
++	logger := log.New(os.Stdout, "TEST CA: ", log.LstdFlags)
++	testDB := db.NewMemoryStore()
++
++	ca := New(logger, testDB, "", "ecdsa", 0, 1, map[string]Profile{
++		"default": {
++			Description:       "Test profile",
++			PromoteCommonName: false,
++			ValidityPeriod:    7776000,
++		},
++	})
++	t.Log("✓ CA initialized")
++
++	// 2. Generate test key
++	t.Log("\n[2/6] Generating test keypair...")
++	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
++	if err != nil {
++		t.Fatalf("Failed to generate key: %v", err)
++	}
++	t.Log("✓ Keypair generated")
++
++	// 3. Create mock SGX quote
++	t.Log("\n[3/6] Creating mock SGX quote...")
++	mockSGXQuote := make([]byte, 4523) // Realistic SGX quote size
++	_, err = rand.Read(mockSGXQuote)
++	if err != nil {
++		t.Fatalf("Failed to generate mock quote: %v", err)
++	}
++	t.Logf("✓ Mock SGX quote created (%d bytes)", len(mockSGXQuote))
++
++	// 4. Create CSR with SGX extension
++	t.Log("\n[4/6] Creating CSR with SGX extension...")
++	sgxOID := asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 99999, 3, 1}
++
++	template := &x509.CertificateRequest{
++		Subject: pkix.Name{
++			CommonName: "test-sgx.example.com",
++		},
++		DNSNames: []string{"test-sgx.example.com"},
++		ExtraExtensions: []pkix.Extension{
++			{
++				Id:       sgxOID,
++				Critical: false,
++				Value:    mockSGXQuote,
++			},
++		},
++	}
++
++	csrDER, err := x509.CreateCertificateRequest(rand.Reader, template, privateKey)
++	if err != nil {
++		t.Fatalf("Failed to create CSR: %v", err)
++	}
++
++	parsedCSR, err := x509.ParseCertificateRequest(csrDER)
++	if err != nil {
++		t.Fatalf("Failed to parse CSR: %v", err)
++	}
++
++	// Verify CSR has the extension
++	csrHasSGX := false
++	for _, ext := range parsedCSR.Extensions {
++		if ext.Id.Equal(sgxOID) {
++			csrHasSGX = true
++			t.Logf("✓ CSR contains SGX extension (OID: %v, %d bytes)", ext.Id, len(ext.Value))
++			break
++		}
++	}
++
++	if !csrHasSGX {
++		t.Fatal("CSR does not contain SGX extension")
++	}
++
++	// 5. Issue certificate using newCertificate (simulating CompleteOrder flow)
++	t.Log("\n[5/6] Issuing certificate with SGX extension...")
++
++	// Extract SGX extensions (this is what CompleteOrder does)
++	sgxExtensions := getSGXExtensions(parsedCSR.Extensions)
++	t.Logf("  Found %d SGX extension(s) in CSR", len(sgxExtensions))
++
++	// Issue certificate with SGX extensions
++	cert, err := ca.newCertificate(
++		parsedCSR.DNSNames,
++		[]net.IP{},
++		parsedCSR.PublicKey,
++		"test-account-123",
++		"",           // notBefore (empty = now)
++		"",           // notAfter (empty = default validity)
++		"default",    // profile
++		sgxExtensions, // extensions to include
++	)
++
++	if err != nil {
++		t.Fatalf("Failed to issue certificate: %v", err)
++	}
++
++	t.Logf("✓ Certificate issued (serial: %s)", cert.ID)
++
++	// 6. Verify issued certificate contains SGX extension
++	t.Log("\n[6/6] Verifying SGX extension in issued certificate...")
++
++	issuedCert := cert.Cert
++	certHasSGX := false
++	var foundExt pkix.Extension
++
++	for _, ext := range issuedCert.Extensions {
++		if ext.Id.Equal(sgxOID) {
++			certHasSGX = true
++			foundExt = ext
++			break
++		}
++	}
++
++	// Results
++	t.Log("\n" + strings.Repeat("=", 60))
++	t.Log("Test Results")
++	t.Log(strings.Repeat("=", 60))
++
++	if !certHasSGX {
++		t.Error("❌ FAILED: Certificate does NOT contain SGX extension")
++		t.Log("\nExtensions in certificate:")
++		for _, ext := range issuedCert.Extensions {
++			t.Logf("  - OID: %v", ext.Id)
++		}
++		t.Fatal("SGX extension missing from certificate")
++	}
++
++	// Success - verify details
++	t.Log("✅ SUCCESS: Certificate contains SGX extension!")
++	t.Logf("   OID: %v", foundExt.Id)
++	t.Logf("   Size: %d bytes", len(foundExt.Value))
++	t.Logf("   Critical: %v", foundExt.Critical)
++
++	// Verify data integrity
++	if len(foundExt.Value) != len(mockSGXQuote) {
++		t.Errorf("Extension size mismatch: expected %d bytes, got %d bytes",
++			len(mockSGXQuote), len(foundExt.Value))
++	} else {
++		t.Log("✓ Extension size matches original")
++	}
++
++	// Verify data matches byte-for-byte
++	dataMatches := true
++	for i := 0; i < len(mockSGXQuote); i++ {
++		if i >= len(foundExt.Value) || foundExt.Value[i] != mockSGXQuote[i] {
++			dataMatches = false
++			break
++		}
++	}
++
++	if !dataMatches {
++		t.Error("Extension data does not match original SGX quote")
++	} else {
++		t.Log("✓ Extension data matches original SGX quote byte-for-byte")
++	}
++
++	// Verify certificate structure
++	t.Log("\n✓ Certificate issued by: " + issuedCert.Issuer.String())
++	t.Log("✓ Certificate subject: " + issuedCert.Subject.String())
++	t.Logf("✓ Valid from: %v", issuedCert.NotBefore)
++	t.Logf("✓ Valid until: %v", issuedCert.NotAfter)
++	t.Logf("✓ Total extensions: %d", len(issuedCert.Extensions))
++
++	t.Log("\n" + strings.Repeat("=", 60))
++	t.Log("🎉 End-to-End Test PASSED!")
++	t.Log(strings.Repeat("=", 60))
++}
++
++// TestMultipleSGXExtensions tests that multiple SGX extensions are preserved
++func TestMultipleSGXExtensions(t *testing.T) {
++	t.Log("Testing multiple SGX extensions...")
++
++	// Setup CA
++	logger := log.New(os.Stdout, "TEST: ", log.LstdFlags)
++	ca := New(logger, db.NewMemoryStore(), "", "ecdsa", 0, 1, map[string]Profile{
++		"default": {ValidityPeriod: 7776000},
++	})
++
++	// Generate key
++	privateKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
++
++	// Create CSR with 3 SGX extensions
++	quote := make([]byte, 100)
++	collateral := make([]byte, 200)
++	token := make([]byte, 300)
++
++	template := &x509.CertificateRequest{
++		Subject:  pkix.Name{CommonName: "multi-ext.example.com"},
++		DNSNames: []string{"multi-ext.example.com"},
++		ExtraExtensions: []pkix.Extension{
++			{Id: asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 99999, 3, 1}, Value: quote},
++			{Id: asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 99999, 3, 2}, Value: collateral},
++			{Id: asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 99999, 3, 3}, Value: token},
++		},
++	}
++
++	csrDER, _ := x509.CreateCertificateRequest(rand.Reader, template, privateKey)
++	parsedCSR, _ := x509.ParseCertificateRequest(csrDER)
++
++	// Extract SGX extensions
++	sgxExts := getSGXExtensions(parsedCSR.Extensions)
++	t.Logf("Found %d SGX extensions in CSR", len(sgxExts))
++
++	if len(sgxExts) != 3 {
++		t.Fatalf("Expected 3 SGX extensions, got %d", len(sgxExts))
++	}
++
++	// Issue certificate
++	cert, err := ca.newCertificate(
++		parsedCSR.DNSNames,
++		[]net.IP{},
++		parsedCSR.PublicKey,
++		"test-account",
++		"", "", "default",
++		sgxExts,
++	)
++
++	if err != nil {
++		t.Fatalf("Failed to issue cert: %v", err)
++	}
++
++	// Count SGX extensions in issued certificate
++	sgxCount := 0
++	for _, ext := range cert.Cert.Extensions {
++		if isSGXExtension(ext.Id) {
++			sgxCount++
++			t.Logf("✓ Found SGX extension in cert: OID %v (%d bytes)",
++				ext.Id, len(ext.Value))
++		}
++	}
++
++	if sgxCount != 3 {
++		t.Errorf("Expected 3 SGX extensions in certificate, got %d", sgxCount)
++	} else {
++		t.Log("✅ All 3 SGX extensions preserved in certificate")
++	}
++}
+diff --git a/ca/ca_sgx_test.go b/ca/ca_sgx_test.go
+new file mode 100644
+index 0000000..c4c9578
+--- /dev/null
++++ b/ca/ca_sgx_test.go
+@@ -0,0 +1,150 @@
++package ca
++
++import (
++	"crypto/ecdsa"
++	"crypto/elliptic"
++	"crypto/rand"
++	"crypto/x509"
++	"crypto/x509/pkix"
++	"encoding/asn1"
++	"testing"
++)
++
++// Test that getSGXExtensions correctly extracts SGX extensions from CSR
++func TestGetSGXExtensions(t *testing.T) {
++	// Generate a test key
++	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
++	if err != nil {
++		t.Fatalf("Failed to generate key: %v", err)
++	}
++
++	// Create mock SGX quote data
++	mockSGXQuote := make([]byte, 120)
++	for i := range mockSGXQuote {
++		mockSGXQuote[i] = byte(i % 256)
++	}
++
++	// Define SGX extension OID: 1.3.6.1.4.1.99999.3.1
++	sgxOID := asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 99999, 3, 1}
++
++	// Create CSR with SGX extension
++	template := &x509.CertificateRequest{
++		Subject: pkix.Name{
++			CommonName: "test.example.com",
++		},
++		ExtraExtensions: []pkix.Extension{
++			{
++				Id:       sgxOID,
++				Critical: false,
++				Value:    mockSGXQuote,
++			},
++		},
++	}
++
++	csrDER, err := x509.CreateCertificateRequest(rand.Reader, template, privateKey)
++	if err != nil {
++		t.Fatalf("Failed to create CSR: %v", err)
++	}
++
++	csr, err := x509.ParseCertificateRequest(csrDER)
++	if err != nil {
++		t.Fatalf("Failed to parse CSR: %v", err)
++	}
++
++	// Verify CSR has SGX extension
++	found := false
++	for _, ext := range csr.Extensions {
++		if ext.Id.Equal(sgxOID) {
++			found = true
++			t.Logf("✓ CSR contains SGX extension (OID: %v, %d bytes)", ext.Id, len(ext.Value))
++			break
++		}
++	}
++
++	if !found {
++		t.Fatal("CSR does not contain SGX extension")
++	}
++
++	// Test getSGXExtensions function
++	t.Log("Testing getSGXExtensions()...")
++	sgxExts := getSGXExtensions(csr.Extensions)
++
++	if len(sgxExts) == 0 {
++		t.Fatal("❌ FAILED: getSGXExtensions() returned no extensions")
++	}
++
++	t.Logf("✅ SUCCESS: getSGXExtensions() found %d SGX extension(s)", len(sgxExts))
++
++	// Verify the extension
++	for _, ext := range sgxExts {
++		t.Logf("   OID: %v", ext.Id)
++		t.Logf("   Size: %d bytes", len(ext.Value))
++		t.Logf("   Critical: %v", ext.Critical)
++
++		if !ext.Id.Equal(sgxOID) {
++			t.Errorf("Wrong OID: expected %v, got %v", sgxOID, ext.Id)
++		}
++
++		if len(ext.Value) != len(mockSGXQuote) {
++			t.Errorf("Wrong size: expected %d, got %d", len(mockSGXQuote), len(ext.Value))
++		}
++	}
++
++	t.Log("✓ SGX extension extraction verified")
++}
++
++// Test that isSGXExtension correctly identifies SGX OIDs
++func TestIsSGXExtension(t *testing.T) {
++	tests := []struct {
++		name     string
++		oid      asn1.ObjectIdentifier
++		expected bool
++	}{
++		{
++			name:     "SGX Quote OID",
++			oid:      asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 99999, 3, 1},
++			expected: true,
++		},
++		{
++			name:     "SGX Collateral OID",
++			oid:      asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 99999, 3, 2},
++			expected: true,
++		},
++		{
++			name:     "SGX Token OID",
++			oid:      asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 99999, 3, 3},
++			expected: true,
++		},
++		{
++			name:     "Wrong TEE type",
++			oid:      asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 99999, 2, 1}, // SEV-SNP
++			expected: false,
++		},
++		{
++			name:     "Wrong prefix",
++			oid:      asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 1, 24}, // OCSP Must-Staple
++			expected: false,
++		},
++		{
++			name:     "Too short",
++			oid:      asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 99999, 3},
++			expected: false,
++		},
++		{
++			name:     "Too long",
++			oid:      asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 99999, 3, 1, 1},
++			expected: false,
++		},
++	}
++
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			result := isSGXExtension(tt.oid)
++			if result != tt.expected {
++				t.Errorf("isSGXExtension(%v) = %v, expected %v", tt.oid, result, tt.expected)
++			} else {
++				t.Logf("✓ isSGXExtension(%v) = %v", tt.oid, result)
++			}
++		})
++	}
++}
+diff --git a/ca_certs/README.md b/ca_certs/README.md
+new file mode 100644
+index 0000000..5a2125c
+--- /dev/null
++++ b/ca_certs/README.md
+@@ -0,0 +1,19 @@
++# Persistent CA for Testing
++
++This directory contains persistent CA certificates that survive container restarts.
++
++## Structure
++
++- `root-ca.pem` - Root CA certificate (import this into browsers)
++- `root-ca-key.pem` - Root CA private key
++- `intermediate-ca.pem` - Intermediate CA certificate
++- `intermediate-ca-key.pem` - Intermediate CA private key
++
++## Usage
++
++These certificates are generated once and reused across container restarts,
++so you only need to import the root CA into your browser once.
++
++## Generation
++
++Run `./generate_ca_certificates.sh` to create the CA certificates.
+diff --git a/ca_certs/generate_ca_certificates.sh b/ca_certs/generate_ca_certificates.sh
+new file mode 100755
+index 0000000..04b8d85
+--- /dev/null
++++ b/ca_certs/generate_ca_certificates.sh
+@@ -0,0 +1,74 @@
++#!/bin/bash
++#
++# Generate persistent CA certificates for testing
++# These certificates will be valid for 10 years
++#
++
++set -e
++
++CA_DIR="$(cd "$(dirname "$0")" && pwd)"
++cd "$CA_DIR"
++
++# Generate Root CA
++if [ ! -f root-ca-key.pem ]; then
++    echo "Generating Root CA..."
++    openssl genrsa -out root-ca-key.pem 4096
++    
++    openssl req -new -x509 -days 3650 -key root-ca-key.pem -out root-ca.pem \
++        -subj "/C=US/ST=Test/L=Test/O=Janus Test CA/CN=Janus Test Root CA" \
++        -extensions v3_ca
++    
++    echo "✓ Root CA created (valid for 10 years)"
++else
++    echo "✓ Root CA already exists"
++fi
++
++# Generate Intermediate CA
++if [ ! -f intermediate-ca-key.pem ]; then
++    echo "Generating Intermediate CA..."
++    openssl genrsa -out intermediate-ca-key.pem 4096
++    
++    # Create CSR for intermediate
++    openssl req -new -key intermediate-ca-key.pem -out intermediate-ca.csr \
++        -subj "/C=US/ST=Test/L=Test/O=Janus Test CA/CN=Janus Test Intermediate CA"
++    
++    # Sign intermediate with root CA
++    cat > intermediate-ext.cnf <<EOF
++basicConstraints = CA:TRUE, pathlen:0
++keyUsage = critical, digitalSignature, cRLSign, keyCertSign
++subjectKeyIdentifier = hash
++authorityKeyIdentifier = keyid:always
++EOF
++    
++    openssl x509 -req -days 3650 -in intermediate-ca.csr \
++        -CA root-ca.pem -CAkey root-ca-key.pem -CAcreateserial \
++        -out intermediate-ca.pem -extfile intermediate-ext.cnf
++    
++    rm -f intermediate-ca.csr intermediate-ext.cnf
++    
++    echo "✓ Intermediate CA created (valid for 10 years)"
++else
++    echo "✓ Intermediate CA already exists"
++fi
++
++# Create full chain (intermediate + root)
++cat intermediate-ca.pem root-ca.pem > ca-chain.pem
++echo "✓ Full chain created: ca-chain.pem"
++
++# Display certificate info
++echo ""
++echo "Root CA:"
++openssl x509 -in root-ca.pem -noout -subject -dates
++
++echo ""
++echo "Intermediate CA:"
++openssl x509 -in intermediate-ca.pem -noout -subject -dates -issuer
++
++echo ""
++echo "✅ Persistent CA certificates generated successfully!"
++echo ""
++echo "To use in browsers:"
++echo "  1. Import root-ca.pem into Firefox/Chrome certificate store"
++echo "  2. Trust it for 'Websites'"
++echo ""
++echo "These certificates are valid for 10 years and will persist across container restarts."
+diff --git a/test/config/pebble-config.json b/test/config/pebble-config.json
+index fc738ec..21d3c8e 100644
+--- a/test/config/pebble-config.json
++++ b/test/config/pebble-config.json
+@@ -2,27 +2,16 @@
+   "pebble": {
+     "listenAddress": "0.0.0.0:14000",
+     "managementListenAddress": "0.0.0.0:15000",
+-    "certificate": "test/certs/localhost/cert.pem",
+-    "privateKey": "test/certs/localhost/key.pem",
++    "certificate": "test/certs/localhost.pem",
++    "privateKey": "test/certs/localhost-key.pem",
+     "httpPort": 5002,
+     "tlsPort": 5001,
+     "ocspResponderURL": "",
+     "externalAccountBindingRequired": false,
+     "domainBlocklist": ["blocked-domain.example"],
+     "retryAfter": {
+-        "authz": 3,
+-        "order": 5
+-    },
+-    "keyAlgorithm": "ecdsa",
+-    "profiles": {
+-      "default": {
+-        "description": "The profile you know and love",
+-        "validityPeriod": 7776000
+-      },
+-      "shortlived": {
+-        "description": "A short-lived cert profile, without actual enforcement",
+-        "validityPeriod": 518400
+-      }
++      "authz": 3,
++      "order": 5
+     }
+   }
+ }

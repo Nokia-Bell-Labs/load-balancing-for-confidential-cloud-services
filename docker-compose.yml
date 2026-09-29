@@ -1,0 +1,72 @@
+# © 2026 Nokia
+# Licensed under the BSD 3-Clause Clear License
+# SPDX-License-Identifier: BSD-3-Clause-Clear
+
+# Janus multi-server stack
+#
+# Services:
+#   frontend – frontend server (SGX enclave / direct mode)
+#              bundles Pebble CA; obtains its TLS cert via ACME on startup
+#   backend  – back-end Janus server (CVM / direct mode)
+#              registers with the frontend on startup; receives frontend-signed cert
+#
+# Usage (direct / test mode):
+#   docker compose up --build
+#
+# To scale back-ends:
+#   docker compose up --build --scale backend=3
+
+services:
+
+  frontend:
+    build:
+      context: .           # repo root is the Docker build context
+      dockerfile: janus/frontend/Dockerfile
+    image: janus-frontend:latest
+    container_name: janus-frontend
+    environment:
+      SERVER_TYPE: direct  # change to 'sgx' when running under Gramine
+      FRONTEND_PORT: 6037
+      # This compose file is the no-TEE mock test: the backend has no
+      # attestation device and sends empty evidence, which the frontend
+      # now rejects unless mock attestation is explicitly enabled.  Never
+      # set this on a real deployment.
+      JANUS_ALLOW_MOCK_ATTESTATION: "1"
+    ports:
+      - "6037:6037"        # HTTPS (proxy mode + registration API)
+    networks:
+      janusnet:
+        aliases:
+          - frontend
+    healthcheck:
+      test: ["CMD", "curl", "-k", "-sf", "https://localhost:6037/"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+
+  backend:
+    build:
+      context: .
+      dockerfile: janus/backend/Dockerfile
+    image: janus-backend:latest
+    environment:
+      FRONTEND_URL: https://frontend:6037
+      FRONTEND_CA_CERT_PATH: insecure
+      # Paper backends are SEV-SNP CVMs. With no TEE here the SNP evidence
+      # bundle can't be built, so the backend sends an empty quote and the
+      # frontend falls back to mock attestation — exercises the full
+      # register → DC → serve path without real hardware.
+      CVM_TYPE: snp
+      BACKEND_PORT: 8443
+    ports:
+      - "8443:8443"         # expose backend for redirection-mode testing
+    networks:
+      - janusnet
+    depends_on:
+      frontend:
+        condition: service_healthy
+
+networks:
+  janusnet:
+    driver: bridge

@@ -1,0 +1,31 @@
+© 2026 Nokia
+Licensed under the BSD 3-Clause Clear License
+SPDX-License-Identifier: BSD-3-Clause-Clear
+
+BoringSSL for dc_proxy
+======================
+
+dc_proxy links BoringSSL statically because it needs the RFC 9345
+Delegated-Credential *server* API, which the stock TLS stacks do not expose.
+BoringSSL is not vendored here; build it once from the pinned commit plus the
+patch in this directory, then point the Makefile at the checkout.
+
+  Base commit: d258906c992e30c07328eac375f2c6a4a0f30fd9
+  Patch:       boringssl-dc.patch   (apply on top of that commit)
+
+Easiest: run `./fetch_boringssl.sh` (clones the pinned commit into ./boringssl,
+applies the patch, and builds the static libs), then `make`.
+
+Equivalent manual steps (from this directory):
+
+  git clone https://boringssl.googlesource.com/boringssl
+  cd boringssl
+  git checkout d258906c992e30c07328eac375f2c6a4a0f30fd9
+  git apply ../boringssl-dc.patch
+  cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build
+  cd ..
+  make                       # builds dc_proxy against ./boringssl
+
+The Makefile defaults to BORINGSSL=./boringssl (gitignored) and expects the
+static libraries at $(BORINGSSL)/build/{libssl,libcrypto}.a. Use a checkout
+elsewhere with `make BORINGSSL=/path/to/boringssl`.
