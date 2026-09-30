@@ -91,7 +91,7 @@ def make_driver(firefox, geckodriver, use_ext, xpi):
     o.set_preference("toolkit.telemetry.enabled", False)
     o.set_preference("network.captive-portal-service.enabled", False)
     o.set_preference("datareporting.healthreport.uploadEnabled", False)
-    svc = Service(executable_path=geckodriver, log_output="/tmp/gecko.log")
+    svc = Service(executable_path=geckodriver, log_output=f"/tmp/gecko.{os.getuid()}.log")
     d = webdriver.Firefox(service=svc, options=o)
     if use_ext:
         d.install_addon(xpi, temporary=True)

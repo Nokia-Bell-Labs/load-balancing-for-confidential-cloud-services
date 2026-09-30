@@ -6,10 +6,10 @@
 """One entry point for the artifact evaluation. It wraps the per-claim scripts.
 
     ./ae.py -m test                       # pre-flight check: endpoints, attestation, pool
-    ./ae.py -m data   [-r RUN] [-e LIST]  # run the experiments (default: all that the standing testbed supports)
+    ./ae.py -m data   [-r RUN] [-e LIST]  # run the experiments (default: everything except the LLM run)
     ./ae.py -m figures [-r RUN]           # figures and tables from THAT run only -> <results>/<RUN>/paper-repro/ (+ coverage.md)
     ./ae.py -m status [-r RUN]            # what the run has done so far (manifest.json)
-    ./ae.py -m testbed                    # state of the testbed: frontend, pool and profile, app backend, H100, Fig. 6 window
+    ./ae.py -m testbed                    # state of the testbed: frontend, pool and profile, app backend, H100, profile service
     ./ae.py -m clean  [-r RUN]            # move the raw data of a run aside, clear netem
 
 Every run has an id (-r). The default is the newest run, or a new one named ae-<UTC time>.
@@ -22,15 +22,16 @@ Experiments for -e (comma-separated):
     table3   certificate and DC sizes (live)                                           ~1 min
     table2   establishment latency at RTT 0/40/80/120 (Table 2 and Fig. 5)              ~1 h   (COLD=1 adds the cold-cache pass)
     fig6     Fig. 6 curve: N = 32, 16, 8, 4, 2, 1 (FIG6_SIZES; "current" = one point at the present size of the pool)
-             + the single-server baselines at N=1. ae.py resizes the pool for each point through the
-             pool-size service of the operators. This service runs during your Fig. 6 window (profile "scale")  ~1.5 h
-    fig7c    microservice workload   (pool profile "hotel", pre-checked)              ~10 min
-    fig7a    browser workload        (pool profile "browser", pre-checked)            ~10 min
-    fig7b    LLM workload, a separate on-request option. The H100 CVM is started for your window
-             (profile "gpu"). It is never part of the default                          ~20 min
-Groups: -e default (= table1,table3,table2). This is the default group. It runs on the standing pool.
-Every other experiment needs its own pool profile. We set the profile for your window (docs/ACCESS.md).
-The groups are -e fig6 (scale: the whole curve in one run), -e fig7c (hotel), -e fig7a (browser), -e fig7b (gpu, on request).
+             + the single-server baselines at N=1                                     ~1.5 h
+    fig7c    microservice workload   (pool profile "hotel")                            ~10 min
+    fig7a    browser workload        (pool profile "browser")                          ~10 min
+    fig7b    LLM workload on the H100 CVM (profile "gpu"), a separate option: the H100 must be started by us,
+             so it is never part of the default; ask for it in the thread              ~20 min
+Every experiment needs a pool profile (default for the tables and Fig. 5, one size per Fig. 6 point, hotel, browser,
+gpu). ae.py requests the profile from the profile service of the operators before each experiment and waits until
+the pool is in that state, so a whole run needs no message to us. A switch takes 1 to 5 minutes.
+Groups: -e default (= all = table1,table3,table2,fig6,fig7c,fig7a, about 3 h), -e tables (= table1,table3,table2),
+-e scale (= fig6), -e hotel (= fig7c), -e browser (= fig7a), -e gpu (= fig7b).
 Use the same -r for all of them, so they land in one run. --cold adds the cold-cache pass of Table 2.
 """
 import argparse, csv, glob, hashlib, json, os, shutil, signal, ssl, subprocess, sys, time, urllib.request
@@ -39,11 +40,13 @@ HERE = os.path.dirname(os.path.abspath(__file__)); ROOT = os.path.abspath(os.pat
 sys.path.insert(0, HERE)
 from render_env import read_env, ENV_FILE
 
-DEFAULT = ["table1", "table3", "table2"]                  # phase 1: the standing pool (default)
+TABLES = ["table1", "table3", "table2"]                                   # the standing pool (profile "default")
+DEFAULT = TABLES + ["fig6", "fig7c", "fig7a"]                             # everything except the LLM run (needs the H100)
 ALL = ["table1", "table3", "table2", "fig6", "fig7c", "fig7a", "fig7b"]
-# Every other experiment needs its own pool profile (scale: fig6, hotel: fig7c, browser: fig7a, gpu: fig7b). The operators set it.
-# There is no "all" group on purpose. Experiments that need different profiles cannot run in one go.
-GROUPS = {"default": DEFAULT, "scale": ["fig6"], "hotel": ["fig7c"], "browser": ["fig7a"], "gpu": ["fig7b"]}
+# Every experiment needs a pool profile. ae.py requests it from the profile service of the operators before the
+# experiment (request_profile) and waits until the pool is in that state, so a run needs no message to the operators.
+PROFILE_OF = {"table1": "default", "table3": "default", "table2": "default", "fig7c": "hotel", "fig7a": "browser", "fig7b": "gpu"}   # fig6: one request per pool size
+GROUPS = {"default": DEFAULT, "all": DEFAULT, "tables": TABLES, "scale": ["fig6"], "hotel": ["fig7c"], "browser": ["fig7a"], "gpu": ["fig7b"]}
 EXPECTED_MIN = {"table1": 1, "table3": 1, "table2": 60, "fig6": 7, "fig6-N1": 25, "fig7c": 5, "fig7a": 3, "fig7b": 20}   # for the progress lines
 
 FIGS = {"fig_latency_breakdowns.pdf": "figure_5.pdf", "fig_scale_backends.pdf": "figure_6.pdf", "fig_apps.pdf": "figure_7.pdf"}
@@ -124,27 +127,39 @@ FIG6_SIZES_DEFAULT = "32,16,8,4,2,1"         # the Fig. 6 points of the paper, l
 POOL_STATE = "/tmp/janus-pool-state"   # on the client VM. The service of the operators answers here
 POOL_REQUEST = f"/tmp/janus-pool-request.{os.environ.get('USER') or os.getuid()}"   # one request file per account (/tmp is sticky)
 
-def request_pool_size(e, n, wait_min=20):
-    """Ask the pool-size service of the operators to set the pool to n backends. The service runs during a
-    Fig. 6 window (docs/ACCESS.md). Then wait until the frontend reports n backends in service. The evaluator
-    account writes the request file. The service polls the file from the operator side. It resizes the pool
-    and writes the state file."""
+def _profile_ok(e, token):
+    """Is the pool in the state that `token` names? (numbers: a Fig. 6 point of that size)"""
+    bs = [b.get("backend", "") for b in pool(e) if b.get("mode") == "in-service"]
+    if token.isdigit(): return len(bs) == int(token)
+    if token == "hotel":   return any(b.endswith(":8543") for b in bs)
+    if token == "browser": return any(b.endswith(":8643") for b in bs)
+    if token == "gpu":     return any(b.startswith(e["GPU_HOST"] + ":") for b in bs) if e.get("GPU_HOST") else bool(bs)   # GPU_HOST unset: trust the service's answer
+    return bool(bs) and not any(b.endswith((":8543", ":8643")) or b.startswith(e.get("GPU_HOST", "-") + ":") for b in bs)   # default
+
+def request_profile(e, token, wait_min=20):
+    """Ask the profile service of the operators for a pool profile ("default", "hotel", "browser", "gpu") or a Fig. 6
+    pool size ("32" ... "1"), then wait until the frontend shows the pool in that state. The evaluator account writes
+    the request file; the service polls it from the operator side, switches the pool and writes the state file. A
+    profile that is already in place is confirmed within seconds; a switch takes 1 to 5 minutes."""
     serial = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + f"-{os.getpid()}"
-    with open(POOL_REQUEST, "w") as f: f.write(f"{serial} {n}\n")
-    print(f"requested pool size {n} from the pool-size service of the operators (serial {serial}). Waiting for the service to apply it", flush=True)
+    with open(POOL_REQUEST, "w") as f: f.write(f"{serial} {token}\n")
+    what = f"pool size {token}" if token.isdigit() else f"profile '{token}'"
+    print(f"requested {what} from the profile service of the operators (serial {serial}); waiting for the pool", flush=True)
     t0 = time.time()
     while time.time() - t0 < wait_min * 60:
         try: st = open(POOL_STATE).read().split()
         except OSError: st = []
         if len(st) >= 3 and st[0] == serial:
             if st[2] == "ready":
-                k = sum(1 for b in pool(e) if b.get("mode") == "in-service")
-                if k == n: print(f"pool has {n} backends in service after {(time.time()-t0)/60:.1f} min", flush=True); return True
-                print(f"service reports ready, but the frontend shows {k} in service, not {n}", flush=True); return False
-            if st[2] == "failed": print(f"the pool-size service could not set {n}: {' '.join(st[3:])}", flush=True); return False
+                if _profile_ok(e, token): print(f"pool is in {what} after {(time.time()-t0)/60:.1f} min", flush=True); return True
+                print(f"the service reports ready, but the frontend does not show {what}", flush=True); return False
+            if st[2] == "failed": print(f"the profile service could not set {what}: {' '.join(st[3:])}", flush=True); return False
         time.sleep(10)
-    print(f"no answer from the pool-size service within {wait_min} min. The Fig. 6 window is not open. Ask us in the thread to open it (docs/ACCESS.md). Then run again. The run keeps the finished sizes (resume).", flush=True)
+    print(f"no answer from the profile service within {wait_min} min. The service is not running on the operator side: tell us in the thread, then run the same command again (it resumes).", flush=True)
     return False
+
+def request_pool_size(e, n, wait_min=20):
+    return request_profile(e, str(n), wait_min)
 
 def print_summary(run, rd, save=None):
     """Print the tables of the paper with the values of this run (summary.py). With `save`, write the Markdown
@@ -176,17 +191,19 @@ def data_mode(exps, e, run, resume):
                 sizes = os.environ.get("FIG6_SIZES", FIG6_SIZES_DEFAULT)
                 plan += [("fig6", None)] if sizes == "current" else [("fig6", int(n)) for n in sizes.split(",")]
             else: plan.append((x, None))
+        current = None                                             # the profile this run last put in place
         for x, want in plan:
-            if want is not None:                                   # a Fig. 6 point: the pool must be at that size first
-                key = f"fig6-N{want}"
-                if resume and m["experiments"].get(key, {}).get("status") == "succeeded":
-                    print(f"\n===== {key}: already succeeded in run {run}, skipped (resume) ====="); continue
-                have = sum(1 for b in pool(e) if b.get("mode") == "in-service")
-                if have != want and not request_pool_size(e, want):
+            key = f"fig6-N{want}" if want is not None else x
+            if resume and m["experiments"].get(key, {}).get("status") == "succeeded":
+                print(f"\n===== {key}: already succeeded in run {run}, skipped (resume) ====="); continue
+            token = str(want) if want is not None else PROFILE_OF.get(x, "default")   # a Fig. 6 point: the pool at that size
+            if token != current:
+                if not request_profile(e, token):
                     m["experiments"][key] = {"status": "failed", "exit_code": 3, "started_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                                              "finished_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "log": "", "pool": pool(e), "attempt": 1,
-                                             "error": f"pool could not be set to {want} backends"}; save_manifest(e, run, m); rc_all |= 1
-                    print(f"===== {key}: FAILED (pool not at {want}) =====", flush=True); continue
+                                             "error": f"pool profile '{token}' could not be set"}; save_manifest(e, run, m); rc_all |= 1
+                    print(f"===== {key}: FAILED (pool profile '{token}' not available) =====", flush=True); continue
+                current = token
             snapshot = pool(e); n_pool = sum(1 for b in snapshot if b.get("mode") == "in-service")
             key = f"fig6-N{n_pool}" if x == "fig6" else x        # the pool size identifies a scale point
             st = m["experiments"].get(key, {})

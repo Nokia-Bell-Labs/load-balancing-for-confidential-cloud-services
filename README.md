@@ -121,10 +121,10 @@ script over SSH and copies the results back. The steps are:
 
 1. `test`: the pre-flight. It checks every server, verifies the attestation of
    the frontend and lists the pool (1 minute).
-2. `data`: the measurements. The default set (Tables 1 to 3 and Fig. 5) needs
-   nothing from us. Fig. 6 and the three application workloads each need the
-   pool in a different state, called a *profile*, which we switch for you when
-   you ask in the HotCRP thread.
+2. `data`: the measurements. Each experiment needs the backend pool in a
+   certain state, called a *profile*. The script requests it from our profile
+   service and waits until the pool is ready, so a whole run needs no message
+   to us. The LLM run is the one exception: its H100 CVM is started on request.
 3. `figures`: the figures and tables of the paper, drawn from your data only,
    printed in the terminal and saved as files.
 4. `fetch`: everything to `./janus-ae-results/` on your laptop.
@@ -136,7 +136,7 @@ script over SSH and copies the results back. The steps are:
 | Table 1 (startup, registration) | `table1` | `default` | 1 min |
 | Table 3 (certificate and DC sizes) | `table3` | `default` | 1 min |
 | Table 2 and Fig. 5 (establishment latency vs RTT) | `table2` | `default` | 1 h |
-| Fig. 6 (throughput vs pool size, N = 1 to 32) | `fig6` | `scale` (32 backends, resized by our pool-size service) | 1.5 h |
+| Fig. 6 (throughput vs pool size, N = 1 to 32) | `fig6` | `scale` (32 backends, resized by our profile service) | 1.5 h |
 | Fig. 7(c) (microservice application) | `fig7c` | `hotel` | 5 min |
 | Fig. 7(a) (browser page load) | `fig7a` | `browser` | 3 min |
 | Fig. 7(b) (LLM time to first token) | `fig7b` | `gpu` (H100 CVM, on request) | 20 min |
@@ -252,7 +252,7 @@ experiment fails the command. The driver never replaces a failed experiment
 with the data of the paper.
 
 **What it does**, in this order. These three experiments need nothing from us.
-The pool is always in the state they need (the `default` profile):
+These three run on the `default` profile:
 
 | Experiment | Reproduces | Time |
 | --- | --- | --- |
@@ -260,23 +260,23 @@ The pool is always in the state they need (the `default` profile):
 | `table3` | Table 3: the sizes of the certificate and of the Delegated Credential, measured live | 1 min |
 | `table2` | Table 2 and Fig. 5: the TLS establishment latency of the five protocols at 0/40/80/120 ms RTT (warm AS-key cache, as the paper reports; `COLD=1` adds the cold pass) | 1 h |
 
-The other experiments each need the backend pool in a different state, called
-a *profile*. Only we can switch the profile. Ask for it with one message in the
-HotCRP thread, for example "please set the *hotel* profile". The switch takes
-us about one minute. Then run the experiment. Keep the same `RUN=` so that all
+The other experiments each need a different profile. The script requests it
+from our profile service before the experiment and waits for the switch, one
+to five minutes; you do not need to ask us. Keep the same `RUN=` so that all
 results land in one run:
 
 | Experiment | Reproduces | Time |
 | --- | --- | --- |
-| `fig6` | Fig. 6, the whole curve in one run: the sustained throughput of proxy mode and redirection mode at N = 32, 16, 8, 4, 2 and 1 backends, plus the single-server baselines at N = 1 (rate-capped as in the paper). During your Fig. 6 window we keep the 32 backend CVMs up and run a *pool-size service*. The script asks the service for each size in turn and waits until the frontend shows that many backends in service (3 to 6 minutes per resize). You run one command. | about 1.5 h |
+| `fig6` | Fig. 6, the whole curve in one run: the sustained throughput of proxy mode and redirection mode at N = 32, 16, 8, 4, 2 and 1 backends, plus the single-server baselines at N = 1 (rate-capped as in the paper). The 32 backend CVMs are up during your slot. The script asks our profile service for each size in turn and waits until the frontend shows that many backends in service (3 to 6 minutes per resize). You run one command. | about 1.5 h |
 | `fig7c` | Fig. 7(c): the end-to-end latency of the microservice application under the five protocols (profile *hotel*) | 5 min |
 | `fig7a` | Fig. 7(a): the page-load time in a real Firefox with the Janus extension, for vanilla TLS, redirection mode and proxy mode (profile *browser*) | 3 min |
 | `fig7b` | Fig. 7(b): the LLM time-to-first-token on a confidential H100 VM. **Separate, on-request option**: the H100 CVM is expensive. It is not part of the standing testbed and not part of any default run. Ask in the thread and we bring it up for your window (profile *gpu*). Then run `-e fig7b`. | 20 min |
 
 ```sh
-RUN=<your run id> eval/ae/ae-remote.sh janus-client data -e fig6     # after we open the Fig. 6 window (the whole curve, about 1.5 h)
-RUN=<your run id> eval/ae/ae-remote.sh janus-client data -e fig7c    # after we set the hotel profile
-RUN=<your run id> eval/ae/ae-remote.sh janus-client data -e fig7a    # after we set the browser profile
+RUN=<your run id> eval/ae/ae-remote.sh janus-client data            # everything except the LLM run, about 3 h; the pool switches itself
+RUN=<your run id> eval/ae/ae-remote.sh janus-client data -e fig6    # or one experiment at a time (the whole curve, about 1.5 h)
+RUN=<your run id> eval/ae/ae-remote.sh janus-client data -e fig7c   # 5 min
+RUN=<your run id> eval/ae/ae-remote.sh janus-client data -e fig7a   # 3 min
 ```
 
 Each script checks the profile before it measures. If the profile is not in
@@ -326,26 +326,22 @@ manifest.json    (one level up) source commit, configuration, pool, status and e
 ```sh
 export RUN=ae-$(date -u +%Y%m%dT%H%M)                   # one run id for everything below
 eval/ae/ae-remote.sh janus-client test                  # 1 min
-eval/ae/ae-remote.sh janus-client testbed               # seconds: what is up right now (pool profile, H100, Fig. 6 window)
-eval/ae/ae-remote.sh janus-client data                  # about 1 h   (Tables 1-3, Fig. 5; standing pool)
-eval/ae/ae-remote.sh janus-client data -e fig6          # about 1.5 h (after we open the Fig. 6 window: 32 backends + the pool-size service)
-eval/ae/ae-remote.sh janus-client data -e fig7c         # 5 min  (after we set the hotel profile)
-eval/ae/ae-remote.sh janus-client data -e fig7a         # 3 min  (after we set the browser profile)
+eval/ae/ae-remote.sh janus-client testbed               # seconds: what is up right now (pool profile, H100, profile service)
+eval/ae/ae-remote.sh janus-client data                  # about 3 h (Tables 1-3, Fig. 5, Fig. 6, Fig. 7c, Fig. 7a; the pool switches itself)
 eval/ae/ae-remote.sh janus-client figures               # 1 min
 ```
 
 `eval/ae/ae-remote.sh janus-client all` runs `test`, the default data set
 and `figures` as one command. It stops at the first stage that fails.
-**Total time**: about **3 hours**, including the three profile switches. Each
-switch is one message in the thread. With the optional LLM run, plan half a
-day.
+**Total time**: about **3 hours**, including the profile switches, which the
+script requests itself. With the optional LLM run, plan half a day.
 
 ## Watching, Stopping and Resuming a Run
 
 - `eval/ae/ae-remote.sh janus-client testbed` prints the state of the testbed
   in a few seconds: the frontend and its attestation, the backend pool and its
-  profile, the application backend, the H100 CVM, and whether the Fig. 6
-  window is open.
+  profile, the application backend, the H100 CVM, and whether our profile
+  service is up.
 - `data`, `run` and `attach` show the log of the run on your laptop while it
   runs. The first line is `started: ...`. Then the lines of the run appear as
   the client writes them, with a delay of at most 5 seconds. Every experiment
@@ -377,9 +373,9 @@ day.
   `~/ae-results/<run>/logs/<experiment>.log`. The `figures` and `fetch` steps
   copy the logs. The `manifest.json` of the run records the status and the
   exit code of each experiment.
-- A profile check that fails ("ask us for the hotel profile") means that the
-  pool is not in the state the experiment needs. Post the request in the
-  thread, then run the same command again.
+- A profile request that fails means that our profile service did not answer
+  or could not switch the pool. Post in the thread, then run the same command
+  again; it resumes where it stopped.
 - When you run `data` again with the same `RUN=`, the driver resumes. It skips
   the experiments that succeeded and runs the failed ones again.
 - `docs/TROUBLESHOOTING.md` covers the problems we have seen: a slow

@@ -4,7 +4,7 @@
 # SPDX-License-Identifier: BSD-3-Clause-Clear
 
 # Current state of the testbed, in a few lines: frontend, backend pool and its profile, application backend,
-# H100 CVM, and whether the Fig. 6 window is open. Reads only. Takes a few seconds.
+# H100 CVM, and whether our profile service is up. Reads only. Takes a few seconds.
 #   ./testbed_status.sh
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"; ROOT="$(cd "$HERE/../.." && pwd)"
@@ -30,7 +30,7 @@ except Exception as e:
 d = json.load(urllib.request.urlopen(f"https://{host}:{port}/pool_status", context=ctx, timeout=10))
 bs = [b for b in d["backends"] if b["cvm_mode"] == "in-service"]
 ports = sorted({int(b["port"]) for b in bs})
-prof = {8443: "default (test application; Fig. 6 sizes when the window is open)", 8543: "hotel (Fig. 7c)", 8643: "browser (Fig. 7a)"}
+prof = {8443: "default (test application; Fig. 6 sizes during a fig6 run)", 8543: "hotel (Fig. 7c)", 8643: "browser (Fig. 7a)"}
 label = "none" if not ports else (prof.get(ports[0], "?") if len(ports) == 1 else "mixed")
 print(f"  backend pool    {len(bs)} in service  profile: {label}")
 for b in bs[:6]: print(f"                  {b['ip_address']}:{b['port']}")
@@ -51,12 +51,12 @@ if [ -n "${GPU_HOST:-}" ]; then
 else
   echo "  H100 CVM        not started (on request, Fig. 7b)"
 fi
-# Fig. 6 window: the pool-size service leaves a heartbeat on this VM
+# profile service: the operators' service that switches the pool for the evaluator's run leaves a heartbeat on this VM
 if [ -f /tmp/janus-pool-service.alive ]; then
   read -r ts ncvm < /tmp/janus-pool-service.alive; age=$(( $(date +%s) - ${ts:-0} ))
-  if [ "$age" -lt 90 ]; then echo "  Fig. 6 window   open: ${ncvm:-?} backend CVMs up for the curve, the pool-size service answered ${age}s ago (-e fig6 can run; it registers 32, 16, 8, 4, 2, 1 in turn)"; else echo "  Fig. 6 window   closed (service last seen ${age}s ago; ask in the thread)"; fi
+  if [ "$age" -lt 90 ]; then echo "  profile service up: it switches the pool for your run (${ncvm:-?} backend CVMs up for Fig. 6; answered ${age}s ago)"; else echo "  profile service down (last answer ${age}s ago; tell us in the thread)"; fi
 else
-  echo "  Fig. 6 window   closed (ask in the thread to open it)"
+  echo "  profile service down (tell us in the thread)"
 fi
 # a run in progress?
 if pgrep -u "$USER" -f '[a]e.py -m data' >/dev/null; then echo "  evaluation run  in progress (ae-remote.sh ... status shows it)"; else echo "  evaluation run  none in progress"; fi

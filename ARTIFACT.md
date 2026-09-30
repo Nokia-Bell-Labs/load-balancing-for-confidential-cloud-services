@@ -64,13 +64,13 @@ and the admission of the backends on every connection you make.
 ## Reproducing the claims
 
 `eval/ae/ae.py` runs everything in order. Its modes are `-m test`, `-m data`,
-and `-m figures`. See `README.md`. Phase 1 is `-e default`. This is the
-default experiment. It covers Tables 1–3 and Fig. 5 on the standing pool.
+and `-m figures`. See `README.md`. `-e default` (the same as `-e all`) runs
+Tables 1–3, Fig. 5, Fig. 6, Fig. 7(c) and Fig. 7(a) in one command; `ae.py`
+requests the pool profile each experiment needs from our profile service and
+waits for it. See `docs/ACCESS.md`. The experiments and their profiles are:
 
-After phase 1, you run one experiment per pool profile. We switch the pool
-profile for you. See `docs/ACCESS.md`. The experiments are:
-
-- `-e fig6` with profile *scale*,
+- `-e table1`, `-e table3`, `-e table2` with profile *default*,
+- `-e fig6` with one *scale* size per point,
 - `-e fig7c` with profile *hotel*,
 - `-e fig7a` with profile *browser*, and
 - `-e fig7b` with profile *gpu*, on request.
@@ -89,7 +89,7 @@ in `README.md`, section "Environment".
 | --- | --- | --- | --- | --- | --- | --- |
 | **Table 1** startup ≈7.1 s dominated by CA issuance; registration ≈2.0 s dominated by the SNP quote; DC issuance 0.03 ms | the startup and registration steps are timed on the servers by the collectors in `plotting/startup_latency/run_*.sh`. We run them for you on request and post the timings in the thread. On the client, `run_table1.sh` measures the DC-issuance signing cost live and checks the certificate of the running frontend | `eval/ae/run_table1.sh` | 1 min | frontend: keypair 5 ms, quote 19 ms, AS 112 ms, CA 7.0 s; backend: keypair 3 ms, quote 1.9 s, AS 38 ms | the servers (on request) and the client VM | < 1 MB |
 | **Table 2 / Fig. 5** Janus-proxy within ≈4 ms of vanilla TLS at every RTT; redirection pays one extra connection; RA+TLS and HTTPA/2 pay a quote + AS call per connection | a series of measurements over RTT, n=200, warm + cold AS-key cache | `eval/ae/run_table2_fig5.sh` | ~1 h (COLD=1: ~2 h) | medians at RTT 0/40/80/120 ms: vanilla 2/83/163/243; Janus-proxy 6/86/167/247; Janus-redir. 14/217/417/617; RA+TLS 105/275/438/608; HTTPA/2 107/312/524/724 | client VM, SGX frontend, 1 backend CVM (any pool size) | < 5 MB |
-| **Fig. 6** redirection scales linearly with the pool (318 req/s at N=32); proxy plateaus at the frontend's forwarding capacity (≈157–162); per-connection attestation caps the baselines below one capped backend | open-loop Poisson run per N | `eval/ae/ae.py -m data -e fig6` runs the whole curve. It asks our pool-size service for 32, 16, 8, 4, 2 and 1 backends in turn. It runs `eval/ae/run_fig6.sh <N>` at each size. The baselines run at N=1. `FIG6_SIZES=current` measures one point at the present pool size | ~1.5 h (≈7 min per point + 8 min baselines + 3–6 min per resize) | N=32: Janus-redirection 318 req/s, Janus-proxy plateau ≈152–157; N=16: redirection ≈159, proxy ≈153–157 (both modes are still ≈10·N at N≤8); N=1 baselines: vanilla 9.9, Janus 9.9, RA+TLS 8.5, HTTPA/2 7.2 req/s | client VM, SGX frontend, the 32 backend CVMs (the Fig. 6 window) | < 5 MB |
+| **Fig. 6** redirection scales linearly with the pool (318 req/s at N=32); proxy plateaus at the frontend's forwarding capacity (≈157–162); per-connection attestation caps the baselines below one capped backend | open-loop Poisson run per N | `eval/ae/ae.py -m data -e fig6` runs the whole curve. It asks our profile service for 32, 16, 8, 4, 2 and 1 backends in turn. It runs `eval/ae/run_fig6.sh <N>` at each size. The baselines run at N=1. `FIG6_SIZES=current` measures one point at the present pool size | ~1.5 h (≈7 min per point + 8 min baselines + 3–6 min per resize) | N=32: Janus-redirection 318 req/s, Janus-proxy plateau ≈152–157; N=16: redirection ≈159, proxy ≈153–157 (both modes are still ≈10·N at N≤8); N=1 baselines: vanilla 9.9, Janus 9.9, RA+TLS 8.5, HTTPA/2 7.2 req/s | client VM, SGX frontend, the 32 backend CVMs (the Fig. 6 window) | < 5 MB |
 | **Fig. 7(a)** browser: Janus adds 20 ms (proxy) / 136 ms (redirection, a second connection) to page load; RA+TLS/HTTPA/2 cannot run in a browser | stock Firefox + extension, n=30 | `eval/ae/run_fig7a.sh` | ~10 min | mean PLT vanilla 436, proxy 457, redirection 572 ms (medians 433 / 456 / 568). | client VM (Firefox), SGX frontend, the application backend CVM (profile *browser*) | < 1 MB |
 | **Fig. 7(b)** LLM: Janus-proxy equals vanilla TTFT; RA+TLS 2.7× and HTTPA/2 3.6× | vLLM on an H100 CVM, n=50 | `eval/ae/run_fig7b.sh` (**on request**) | ~20 min + bring-up | mean TTFT: vanilla ≈156 ms, Janus-proxy ≈ vanilla, Janus-redirection 285 ms, RA+TLS 425 ms, HTTPA/2 560 ms (medians 154 / 156 / 285 / 355 / 487; the bench prints p50/p95/p99 and the mean). | client VM, SGX frontend, the H100 CVM (on request) and the application backend CVM for the baselines | < 1 MB |
 | **Fig. 7(c)** microservice: Janus-proxy within ≈8 ms of vanilla; baselines ≈3× | hotelReservation, n=200 | `eval/ae/run_fig7c.sh` | ~10 min | mean vanilla 131, proxy 139, redirection 263, RA+TLS 406, HTTPA/2 370 ms (medians 130 / 138 / 262 / 341 / 327) | client VM, SGX frontend, the application backend CVM (profile *hotel*) | < 1 MB |

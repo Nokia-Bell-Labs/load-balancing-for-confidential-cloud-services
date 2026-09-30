@@ -15,7 +15,7 @@
 #   ./ae-remote.sh ae@<client-address> all             # test -> data -> figures -> fetch        (~1 h)
 #   ./ae-remote.sh ae@<client-address> attach          # join a running evaluation again (follow its log)
 #   ./ae-remote.sh ae@<client-address> status          # progress of the run (done, running with elapsed time)
-#   ./ae-remote.sh ae@<client-address> testbed         # state of the testbed: frontend, pool and profile, app backend, H100, Fig. 6 window
+#   ./ae-remote.sh ae@<client-address> testbed         # state of the testbed: frontend, pool and profile, app backend, H100, profile service
 #   ./ae-remote.sh ae@<client-address> stop            # stop the run in progress cleanly (the netem delay is removed; the same RUN resumes later)
 #   ./ae-remote.sh ae@<client-address> fetch           # copy ~/ae-results + raw eval/data/ae-* -> ./janus-ae-results/
 #   ./ae-remote.sh ae@<client-address> run <ae.py args>   # any other ae.py invocation, detached

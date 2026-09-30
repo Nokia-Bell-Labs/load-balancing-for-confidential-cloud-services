@@ -76,31 +76,27 @@ before you start. Half a day covers everything except the optional GPU
 experiment. Tell us when you are done. Between evaluators we remove the
 previous key and reset the client (results directories and netem rules).
 
-Four rate-capped backends stand in the default deployment (Tables 1 to 3,
-Fig. 5). For Fig. 6 we open a window: we start the full pool of 32 CVMs of the
-paper and we run our pool-size service. With this service, `-e fig6` measures
-the whole curve (32, 16, 8, 4, 2, 1) in one command. The service resizes the
-pool for you between the points. We start the H100 CVM for Fig. 7(b) on
-request, because of its cost.
-
-The backend pool has a *profile*. We set the profile for your window. Only one
-evaluator uses the testbed at a time, so the switch is one message in the
-thread, not a wait:
+The backend pool has a *profile* per experiment. During your slot the 32
+backend CVMs of the paper are up and our *profile service* runs: `ae.py`
+requests the profile each experiment needs and waits until the pool is in
+that state, so you run the whole evaluation without messages to us. `-e fig6`
+measures the whole curve (32, 16, 8, 4, 2, 1) in one command; the service
+resizes the pool between the points. We start the H100 CVM for Fig. 7(b) on
+request, because of its cost. The profiles are:
 
 | Profile | Pool | For |
 | --- | --- | --- |
-| `default` (standing) | 4 capped backends on the test application | Tables 1 to 3, Fig. 5 |
-| `scale` (the Fig. 6 window) | the 32 backend CVMs up and provisioned, the single-server baseline servers rate-capped as in the Fig. 6 runs of the paper, and our *pool-size service* running. `-e fig6` asks the service for 32, 16, 8, 4, 2 and 1 backends in turn. The service registers the pool again at each size (3 to 6 min). The script measures each point. | Fig. 6 |
+| `default` | the backends on the test application, the baseline servers uncapped | Tables 1 to 3, Fig. 5 |
+| `scale` (one size per Fig. 6 point) | the 32 backend CVMs up and provisioned, the single-server baseline servers rate-capped as in the Fig. 6 runs of the paper. `-e fig6` asks the service for 32, 16, 8, 4, 2 and 1 backends in turn. The service registers the pool again at each size (3 to 6 min). The script measures each point. | Fig. 6 |
 | `hotel` | the application backend registered on its hotelReservation front. Proxy mode relays to it through the forwarding path of the frontend inside the enclave. Redirection sends the client to the same front. | Fig. 7(c) |
 | `browser` | the application backend registered under its DNS name on its web-app front. Proxy mode forwards to it. Redirection sends the browser to it. | Fig. 7(a) |
 | `gpu` (on request) | the H100 CVM started and registered, the baseline servers relaying to it. This is a separate option, never part of a default run. | Fig. 7(b) |
 
-Tell us which profiles your window needs, in this order. The default run
-(`-e default`) uses the standing profile. Every other experiment has its own
-profile: ask for the Fig. 6 window (*scale*) and run `fig6`, ask for *hotel*
-and run `fig7c`, ask for *browser* and run `fig7a`. If you asked for the H100
-CVM, ask for *gpu* and run `fig7b`. The scripts check the profile before they
-measure, and they tell you if it is not in place.
+You do not ask for profiles: the script requests *default*, the Fig. 6 sizes,
+*hotel* and *browser* as it goes, and `-e default` (the same as `-e all`) runs
+all of them in one command. If you asked for the H100 CVM, `-e fig7b` requests
+*gpu*. The scripts check the profile before they measure and tell you if it is
+not in place.
 
 ## What you may and may not do
 
