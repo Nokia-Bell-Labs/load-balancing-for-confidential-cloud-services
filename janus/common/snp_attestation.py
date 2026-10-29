@@ -97,6 +97,17 @@ HCL_HEADER_LEN = 32
 SNP_REPORT_LEN = 1184      # AMD SEV-SNP report payload size
 RUNTIME_HDR_LEN = 20       # DataSize|Version|ReportType|HashType|ClaimSize
 
+# Backend code measurement: the Backend extends SHA-256 PCR 15 once per boot
+# with code_measurement() and quotes only that PCR at registration.  The SNP
+# launch measurement covers Azure's HCL/paravisor, not the guest, so it is
+# reported for information only.
+CODE_PCR = 15
+CODE_PCR_SELECTION = f"sha256:{CODE_PCR}"
+TPM_ST_ATTEST_QUOTE = 0x8018
+TPM_ALG_SHA256 = 0x000B
+_ZERO_PCR = bytes(32)
+_PACKAGE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 
 # -----------------------------------------------------------------------------
 # Server-side: produce evidence
@@ -109,6 +120,7 @@ class SnpEvidence:
     pem_chain:     bytes        # VCEK leaf || ASK || ARK, PEM concatenation
     tpm_quote_msg: bytes = b""  # for per-connection nonce binding
     tpm_quote_sig: bytes = b""  # signature over quote_msg by vTPM AK
+    code_digest:   bytes = b""  # the PCR 15 event (code_measurement); optional 5th field
 
 
 def _run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
@@ -230,11 +242,50 @@ def make_tpm_quote(nonce: bytes,
     return m, s
 
 
+def _extend(pcr: bytes, digest: bytes) -> bytes:
+    return hashlib.sha256(pcr + digest).digest()
+
+
+def code_measurement(package_dir: str = _PACKAGE_DIR) -> bytes:
+    """SHA-256 identity of the Janus code the Backend runs: every ``.py`` file
+    of the ``janus`` package, by relative path and content, in sorted order."""
+    files = []
+    for top, dirs, names in os.walk(package_dir):
+        dirs[:] = [d for d in dirs if d != "__pycache__"]
+        for name in names:
+            if name.endswith(".py"):
+                path = os.path.join(top, name)
+                files.append((os.path.relpath(path, package_dir).replace(os.sep, "/"), path))
+    h = hashlib.sha256()
+    for rel, path in sorted(files):
+        with open(path, "rb") as f:
+            h.update(rel.encode("utf-8") + b"\0" + hashlib.sha256(f.read()).digest())
+    return h.digest()
+
+
+def extend_code_pcr(digest: bytes) -> None:
+    """Record ``digest`` as the single PCR 15 event of this boot.  A restart on
+    the same code finds it already there; other code needs a reboot."""
+    with tempfile.TemporaryDirectory() as td:
+        out = os.path.join(td, "pcr.bin")
+        open(out, "wb").close()
+        _run(["sudo", "tpm2_pcrread", CODE_PCR_SELECTION, "-o", out])
+        with open(out, "rb") as f:
+            current = f.read()
+    if current == _extend(_ZERO_PCR, digest):
+        return
+    if current != _ZERO_PCR:
+        raise RuntimeError(f"PCR {CODE_PCR} already records other code; "
+                           "reboot the CVM to measure this code")
+    _run(["sudo", "tpm2_pcrextend", f"{CODE_PCR}:sha256={digest.hex()}"])
+
+
 # PAPER: §4.3 Step 3 — SEV-SNP evidence: HCL report + VCEK chain + vTPM quote whose qualifyingData carries the binding.
 def build_snp_evidence_bundle(nonce: Optional[bytes] = None,
                               pubkey_spki_der: Optional[bytes] = None,
                               vcek_chain_cache: Optional[bytes] = None,
-                              processor: Optional[str] = None) -> bytes:
+                              processor: Optional[str] = None,
+                              code_digest: Optional[bytes] = None) -> bytes:
     """Produce the wire-format evidence bundle.
 
     Wire format:
@@ -242,6 +293,7 @@ def build_snp_evidence_bundle(nonce: Optional[bytes] = None,
         | chain_len:4 | pem_chain (VCEK || ASK || ARK, ~6.5 KB)
         | qmsg_len:4  | tpm_quote_msg (~0.4 KB if nonce given, else 0)
         | qsig_len:4  | tpm_quote_sig
+        [| code_len:4 | code_digest (32 B)]   only with code_digest
 
     Args:
         nonce: per-connection bytes; SHA256(nonce ‖ pubkey_spki_der) becomes the
@@ -255,7 +307,12 @@ def build_snp_evidence_bundle(nonce: Optional[bytes] = None,
             on every call.  Per-VM stable, so caching across the lifetime
             of the CVM is safe.
         processor: "milan" (default), "genoa", "bergamo", "siena", "turin"
+        code_digest: the code_measurement() already extended into PCR 15 by
+            extend_code_pcr(); the quote then covers PCR 15 only and the
+            digest is appended as a fifth field.  Needs a nonce.
     """
+    if code_digest is not None and not nonce:
+        raise ValueError("a code measurement needs a nonce-bound quote")
     hcl = read_hcl_report()
 
     if vcek_chain_cache is not None:
@@ -271,15 +328,20 @@ def build_snp_evidence_bundle(nonce: Optional[bytes] = None,
                 f.write(snp_payload)
             chain = fetch_vcek_chain(rep_path, processor=processor, out_dir=td)
 
-    if nonce:
+    if code_digest is not None:
+        qmsg, qsig = make_tpm_quote(nonce, pubkey_spki_der, pcrs=CODE_PCR_SELECTION)
+    elif nonce:
         qmsg, qsig = make_tpm_quote(nonce, pubkey_spki_der)
     else:
         qmsg, qsig = b"", b""
 
-    return (struct.pack(">I", len(hcl))   + hcl
-          + struct.pack(">I", len(chain)) + chain
-          + struct.pack(">I", len(qmsg))  + qmsg
-          + struct.pack(">I", len(qsig))  + qsig)
+    bundle = (struct.pack(">I", len(hcl))   + hcl
+            + struct.pack(">I", len(chain)) + chain
+            + struct.pack(">I", len(qmsg))  + qmsg
+            + struct.pack(">I", len(qsig))  + qsig)
+    if code_digest is not None:
+        bundle += struct.pack(">I", len(code_digest)) + code_digest
+    return bundle
 
 
 def parse_snp_evidence_bundle(bundle: bytes) -> SnpEvidence:
@@ -300,8 +362,12 @@ def parse_snp_evidence_bundle(bundle: bytes) -> SnpEvidence:
     chain = read_lp()
     qmsg  = read_lp()
     qsig  = read_lp()
+    # Legacy readers ignore trailing bytes; only an exact length-prefixed field is the code digest.
+    code = b""
+    if p + 4 <= len(bundle) and p + 4 + struct.unpack(">I", bundle[p:p+4])[0] == len(bundle):
+        code = read_lp()
     return SnpEvidence(hcl_report=hcl, pem_chain=chain,
-                       tpm_quote_msg=qmsg, tpm_quote_sig=qsig)
+                       tpm_quote_msg=qmsg, tpm_quote_sig=qsig, code_digest=code)
 
 
 # -----------------------------------------------------------------------------
@@ -400,7 +466,8 @@ def verify_snp_bundle(bundle: bytes,
                       expected_measurement: Optional[str] = None,
                       maa_url: str = DEFAULT_MAA_URL,
                       logger: Optional[logging.Logger] = None,
-                      verify_tpm_quote: bool = True
+                      verify_tpm_quote: bool = True,
+                      require_code_measurement: bool = False
                       ) -> Tuple[bool, dict]:
     """Verify an SEV-SNP evidence bundle produced by build_snp_evidence_bundle.
 
@@ -416,6 +483,11 @@ def verify_snp_bundle(bundle: bytes,
       4. Optional: verify TPM2 quote signature against AK pub from the JWT
          claims, and check qualifyingData == SHA256(expected_nonce ‖ expected
          backend TLS public key).
+
+    With ``require_code_measurement`` the measurement is the Backend's code
+    digest, proven by the quote over PCR 15 (a single extend from zero), and
+    expected_measurement is compared with it ("sha256:<hex>" or "<hex>").
+    The launch measurement is then only reported as ``launch_measurement``.
     """
     log = logger or logging.getLogger("snp_attestation")
 
@@ -432,12 +504,19 @@ def verify_snp_bundle(bundle: bytes,
     except Exception as exc:
         return False, {"error": f"MAA verification failed: {exc}"}
 
-    # Policy: measurement match (if requested)
-    measured = claims.get("x-ms-sevsnpvm-launchmeasurement", "")
-    if expected_measurement and expected_measurement.lower() != measured.lower():
-        return False, {"error": "MEASUREMENT mismatch",
-                       "expected": expected_measurement, "got": measured,
-                       "claims": claims}
+    launch = claims.get("x-ms-sevsnpvm-launchmeasurement", "")
+    if require_code_measurement:
+        if not ev.tpm_quote_msg or expected_nonce is None or len(ev.code_digest) != 32:
+            return False, {"error": "evidence carries no nonce-bound code measurement",
+                           "claims": claims}
+        measured = "sha256:" + ev.code_digest.hex()
+    else:
+        measured = launch
+        # Policy: measurement match (if requested)
+        if expected_measurement and expected_measurement.lower() != measured.lower():
+            return False, {"error": "MEASUREMENT mismatch",
+                           "expected": expected_measurement, "got": measured,
+                           "claims": claims}
 
     # NOTE: MAA's `reportdata` claim is the *static* boot-time value
     # (= SHA256(AK pub hash || boot config)) — not a per-connection nonce.
@@ -445,10 +524,12 @@ def verify_snp_bundle(bundle: bytes,
 
     info = {"verified": True, "token": jwt_token, "claims": claims,
             "measurement": measured,
+            "launch_measurement": launch,
             "guestsvn":     claims.get("x-ms-sevsnpvm-guestsvn"),
             "is_debuggable": claims.get("x-ms-sevsnpvm-is-debuggable")}
 
-    if verify_tpm_quote and (ev.tpm_quote_msg or expected_nonce is not None):
+    if (verify_tpm_quote or require_code_measurement) and \
+            (ev.tpm_quote_msg or expected_nonce is not None):
         info["tpm_quote_supplied"] = bool(ev.tpm_quote_msg)
         if expected_nonce is not None and not ev.tpm_quote_msg:
             return False, {"error": "expected_nonce set but no TPM quote in "
@@ -468,7 +549,55 @@ def verify_snp_bundle(bundle: bytes,
             return False, {"error": f"TPM quote verification failed: {exc}",
                            "claims": claims}
 
+    if require_code_measurement:
+        try:
+            _verify_code_pcr(ev.tpm_quote_msg, ev.code_digest)
+        except Exception as exc:
+            return False, {"error": f"code measurement verification failed: {exc}",
+                           "claims": claims}
+        wanted = (expected_measurement or "").lower()
+        if wanted.startswith("sha256:"):
+            wanted = wanted[len("sha256:"):]
+        if wanted and wanted != ev.code_digest.hex():
+            return False, {"error": "MEASUREMENT mismatch",
+                           "expected": expected_measurement, "got": measured,
+                           "claims": claims}
+
     return True, info
+
+
+def _verify_code_pcr(quote_msg: bytes, code_digest: bytes) -> None:
+    """The (already AK-verified) quote selects exactly SHA-256 PCR 15 and its
+    pcrDigest is that of PCR 15 after one extend of ``code_digest`` from zero."""
+    try:
+        magic, kind = struct.unpack_from(">IH", quote_msg, 0)
+        if magic != 0xFF544347 or kind != TPM_ST_ATTEST_QUOTE:
+            raise ValueError("the attestation is not a TPM2 quote")
+        off = 6
+        for _ in range(2):  # qualifiedSigner, extraData
+            size, = struct.unpack_from(">H", quote_msg, off)
+            off += 2 + size
+        off += 17 + 8  # clockInfo, firmwareVersion
+        count, = struct.unpack_from(">I", quote_msg, off)
+        off += 4
+        selected = set()
+        for _ in range(count):
+            alg, size = struct.unpack_from(">HB", quote_msg, off)
+            off += 3
+            bitmap = quote_msg[off:off + size]
+            off += size
+            indices = {8 * i + b for i, bits in enumerate(bitmap) for b in range(8) if bits >> b & 1}
+            if indices and alg != TPM_ALG_SHA256:
+                raise ValueError("the quote selects a bank other than SHA-256")
+            selected |= indices
+        size, = struct.unpack_from(">H", quote_msg, off)
+        pcr_digest = quote_msg[off + 2:off + 2 + size]
+    except struct.error as exc:
+        raise ValueError("the quote is truncated") from exc
+    if selected != {CODE_PCR}:
+        raise ValueError(f"the quote does not select exactly SHA-256 PCR {CODE_PCR}")
+    if hashlib.sha256(_extend(_ZERO_PCR, code_digest)).digest() != pcr_digest:
+        raise ValueError(f"PCR {CODE_PCR} does not hold exactly this code measurement")
 
 
 # PAPER: §4.3 Step 5 — check the quote's qualifyingData == SHA-256(nonce ‖ public key) under the attested AK.

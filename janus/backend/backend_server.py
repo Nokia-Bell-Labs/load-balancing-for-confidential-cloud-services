@@ -362,6 +362,7 @@ class BackendServer:
         """
         if self._cvm_type in ("snp", "tdx"):
             from janus.common.snp_attestation import (build_snp_evidence_bundle,
+                                                code_measurement, extend_code_pcr,
                                                 parse_snp_evidence_bundle)
             nonce_bytes = self._nonce.encode("utf-8") if self._nonce else None
             # Bind the quote to this backend's TLS public key (SPKI DER), not
@@ -372,10 +373,14 @@ class BackendServer:
                 serialization.PublicFormat.SubjectPublicKeyInfo,
             )
             try:
+                code_digest = code_measurement()
+                extend_code_pcr(code_digest)
+                self._logger.info(f"Code measurement sha256:{code_digest.hex()} (PCR 15)")
                 bundle = build_snp_evidence_bundle(
                     nonce=nonce_bytes,
                     pubkey_spki_der=pubkey_der,
                     vcek_chain_cache=self._vcek_chain_cache,
+                    code_digest=code_digest,
                 )
                 if self._vcek_chain_cache is None:
                     self._vcek_chain_cache = parse_snp_evidence_bundle(bundle).pem_chain

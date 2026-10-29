@@ -41,8 +41,10 @@ Frontend and backend are Python ∂(Flask); the TLS-terminating `dc_proxy` and t
 - `sign_dc()` carries the NSS Bug 2018200 workaround (the `algorithm` field is
   placed after the credential in the signed input) so Firefox/NSS accept the DC.
 - Frontend env knobs: `ISSUE_DC=0` skips DC issuance (proxy-only deployments);
-  `EXPECTED_BACKEND_MEASUREMENT=<hex>` enforces a backend launch-measurement
-  admission policy (off by default — any MAA-signed measurement is admitted).
+  `EXPECTED_BACKEND_MEASUREMENT=sha256:<hex>` enforces a backend code-measurement
+  admission policy: the digest of the backend's `janus` Python sources, which the
+  backend extends into vTPM PCR 15 and the quote proves (off by default — any
+  proven code measurement is admitted; the backend logs its value at startup).
 
 Build/run the whole stack from the repo root README; SGX packaging is in
 `../gramine/` and the CA in `../ca/`.

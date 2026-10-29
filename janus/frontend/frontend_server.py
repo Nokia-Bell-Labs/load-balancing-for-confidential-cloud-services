@@ -100,9 +100,11 @@ RENEW_CHECK_S  = int(os.environ.get("JANUS_RENEW_CHECK_S", "60"))
 ATTESTATION_URL  = "https://sharedweu.weu.attest.azure.net"
 MIN_FRESH_INTERVAL = 60   # seconds – rate limit on /attest/fresh
 
-# Admission policy: when set (hex string), a registering backend's attested
-# SNP launch measurement must match it exactly; unset accepts any measurement
-# that MAA signs (the JWT still records the actual value for the client).
+# Admission policy: when set ("sha256:<hex>" or hex), a registering SNP/TDX
+# backend's code measurement (its vTPM-quoted PCR 15, see
+# snp_attestation.code_measurement) must match it exactly; unset accepts any
+# code measurement the quote proves.  The SNP launch measurement covers only
+# Azure's HCL/paravisor and is not compared.
 EXPECTED_BACKEND_MEASUREMENT = os.environ.get("EXPECTED_BACKEND_MEASUREMENT") or None
 
 # Only redirection mode needs an RFC 9345 Delegated Credential (clients
@@ -705,7 +707,11 @@ class FrontendServer:
                     expected_measurement=EXPECTED_BACKEND_MEASUREMENT,
                     maa_url=ATTESTATION_URL,
                     logger=self._logger,
+                    require_code_measurement=True,
                 )
+                if success:
+                    self._logger.info(f"Backend code measurement {attest_result['measurement']} "
+                                      f"(launch measurement {attest_result['launch_measurement']})")
             else:
                 verifier = get_attestation_verifier(
                     attestation_url=ATTESTATION_URL,
