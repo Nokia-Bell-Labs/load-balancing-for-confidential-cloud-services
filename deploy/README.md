@@ -76,6 +76,20 @@ the same and adds what the application workloads need:
 The script header lists the ports. You can re-run either mode. Both modes
 are idempotent.
 
+By default the frontend admits every backend whose attestation verifies. To
+admit only backends that run the approved code, start the frontend with
+`EXPECTED_BACKEND_MEASUREMENT=sha256:<hex>` (`frontend_run.sh` passes it to
+the enclave). The value is the code measurement that a backend logs at
+startup (`Code measurement sha256:<hex> (PCR 15)`), or that
+`python3 -m janus.common.snp_attestation` prints on it. It covers the Janus
+code, `dc_proxy` and the Python dependencies. To include the application,
+export `JANUS_APP_MEASURE` (application files or directories, relative to the
+repository root) and `JANUS_APP_IMAGES` (container images) before
+`backend_setup.sh`, with the same values on every backend. See
+`janus/README.md` for what the measurement covers. PCR 15 records one
+measurement per boot: after a change of the measured code or application,
+reboot the CVM before you start the backend again.
+
 ## 3. Client
 
 ```sh

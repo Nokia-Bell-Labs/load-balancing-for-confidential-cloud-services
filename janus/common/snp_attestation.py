@@ -70,6 +70,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import struct
 import subprocess
 import tempfile
@@ -107,6 +108,10 @@ TPM_ST_ATTEST_QUOTE = 0x8018
 TPM_ALG_SHA256 = 0x000B
 _ZERO_PCR = bytes(32)
 _PACKAGE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# Third-party checkouts that the setup fetches into the janus package; their
+# scripts are not Backend code (BoringSSL is measured as part of dc_proxy).
+_MEASURE_SKIP_DIRS = frozenset({"__pycache__", "boringssl", "snpguest"})
+_ABSENT_DIGEST = hashlib.sha256(b"absent").hexdigest()
 
 
 # -----------------------------------------------------------------------------
@@ -246,21 +251,175 @@ def _extend(pcr: bytes, digest: bytes) -> bytes:
     return hashlib.sha256(pcr + digest).digest()
 
 
-def code_measurement(package_dir: str = _PACKAGE_DIR) -> bytes:
-    """SHA-256 identity of the Janus code the Backend runs: every ``.py`` file
-    of the ``janus`` package, by relative path and content, in sorted order."""
-    files = []
+def _file_sha256(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _env_list(name: str) -> list[str]:
+    return [x.strip() for x in os.environ.get(name, "").split(",") if x.strip()]
+
+
+def _python_dist_entries(requirements_file: str) -> list[tuple[str, str]]:
+    """The files of the installed distributions named in ``requirements_file``
+    and of their dependencies (markers evaluated for this interpreter, no
+    extras), labelled by distribution, version and path inside site-packages."""
+    import importlib.metadata as md
+    try:
+        from packaging.requirements import Requirement
+    except ImportError:
+        from pip._vendor.packaging.requirements import Requirement
+
+    def norm(name: str) -> str:
+        return re.sub(r"[-_.]+", "-", name).lower()
+
+    todo = []
+    with open(requirements_file) as f:
+        for line in f:
+            line = line.split("#", 1)[0].strip()
+            if line:
+                todo.append(Requirement(line).name)
+    seen, entries = set(), []
+    while todo:
+        name = norm(todo.pop())
+        if name in seen:
+            continue
+        seen.add(name)
+        try:
+            dist = md.distribution(name)
+        except md.PackageNotFoundError:
+            entries.append((f"pydist:{name}:absent", _ABSENT_DIGEST))
+            continue
+        tag = f"pydist:{name}=={dist.version}"
+        if dist.files is not None:
+            rels = [str(f).replace(os.sep, "/") for f in dist.files]
+        else:
+            # A distro package without a RECORD: walk its top-level packages.
+            site = str(dist.locate_file(""))
+            rels = []
+            for top_name in (dist.read_text("top_level.txt") or "").split():
+                base = os.path.join(site, top_name)
+                if os.path.isfile(base + ".py"):
+                    rels.append(top_name + ".py")
+                for top, dirs, names in os.walk(base):
+                    dirs[:] = [d for d in dirs if d != "__pycache__"]
+                    rels += [os.path.relpath(os.path.join(top, n), site).replace(os.sep, "/")
+                             for n in names]
+        for rel in rels:
+            parts = rel.split("/")
+            if (rel.startswith("..") or "__pycache__" in parts
+                    or parts[0].endswith((".dist-info", ".egg-info"))):
+                continue          # scripts outside site-packages, bytecode, install metadata
+            path = str(dist.locate_file(rel))
+            if os.path.isfile(path):
+                entries.append((f"{tag}:{rel}", _file_sha256(path)))
+        for req in dist.requires or []:
+            r = Requirement(req)
+            if r.marker is None or r.marker.evaluate({"extra": ""}):
+                todo.append(r.name)
+    return entries
+
+
+def _app_entries(app_paths: list[str], root: str) -> list[tuple[str, str]]:
+    """Every file of the configured application paths (files or directories,
+    relative to the repository root or absolute).  A missing path is an error."""
+    entries = []
+    for p in app_paths:
+        full = p if os.path.isabs(p) else os.path.join(root, p)
+        if os.path.isfile(full):
+            entries.append((f"app:{p}", _file_sha256(full)))
+        elif os.path.isdir(full):
+            for top, dirs, names in os.walk(full):
+                dirs[:] = [d for d in dirs if d not in ("__pycache__", ".git")]
+                for n in names:
+                    path = os.path.join(top, n)
+                    if os.path.isfile(path):
+                        rel = os.path.relpath(path, full).replace(os.sep, "/")
+                        entries.append((f"app:{p.rstrip('/')}/{rel}", _file_sha256(path)))
+        else:
+            raise FileNotFoundError(f"application path to measure not found: {p}")
+    return entries
+
+
+def _image_entries(images: list[str]) -> list[tuple[str, str]]:
+    """The image ID (content digest) of every configured container image."""
+    entries = []
+    for ref in images:
+        image_id = _run(["sudo", "docker", "image", "inspect", "--format", "{{.Id}}", ref],
+                        text=True).stdout.strip()
+        if not image_id.startswith("sha256:"):
+            raise RuntimeError(f"no image ID for container image {ref}: {image_id!r}")
+        entries.append((f"image:{ref}", image_id[len("sha256:"):]))
+    return entries
+
+
+def code_measurement_entries(package_dir: str = _PACKAGE_DIR,
+                             app_paths: Optional[list[str]] = None,
+                             app_images: Optional[list[str]] = None
+                             ) -> list[tuple[str, str]]:
+    """Everything the Backend code measurement covers, as sorted
+    ``(label, sha256-hex)`` pairs:
+
+    - ``janus:``  every ``.py`` file of the ``janus`` package, except the
+      third-party checkouts that the setup fetches into it (BoringSSL for
+      dc_proxy, snpguest): their scripts never run in the Backend;
+    - ``bin:``    the dc_proxy binary (with BoringSSL linked in), if built;
+    - ``pydist:`` the files of the Python distributions in
+      ``backend/requirements.txt`` and of their dependencies;
+    - ``app:``    the files of the application paths (``JANUS_APP_MEASURE``);
+    - ``image:``  the image IDs of the application containers
+      (``JANUS_APP_IMAGES``).
+
+    ``app_paths``/``app_images`` default to these comma-separated variables.
+    """
+    if app_paths is None:
+        app_paths = _env_list("JANUS_APP_MEASURE")
+    if app_images is None:
+        app_images = _env_list("JANUS_APP_IMAGES")
+    entries = []
     for top, dirs, names in os.walk(package_dir):
-        dirs[:] = [d for d in dirs if d != "__pycache__"]
+        dirs[:] = [d for d in dirs if d not in _MEASURE_SKIP_DIRS]
         for name in names:
             if name.endswith(".py"):
                 path = os.path.join(top, name)
-                files.append((os.path.relpath(path, package_dir).replace(os.sep, "/"), path))
+                rel = os.path.relpath(path, package_dir).replace(os.sep, "/")
+                entries.append((f"janus:{rel}", _file_sha256(path)))
+    dc_proxy = os.path.join(package_dir, "backend", "dc_proxy", "dc_proxy")
+    if os.path.isfile(dc_proxy):
+        entries.append(("bin:dc_proxy", _file_sha256(dc_proxy)))
+    requirements = os.path.join(package_dir, "backend", "requirements.txt")
+    if os.path.isfile(requirements):
+        entries += _python_dist_entries(requirements)
+    entries += _app_entries(app_paths, os.path.dirname(package_dir))
+    entries += _image_entries(app_images)
+    return sorted(entries)
+
+
+def measurement_digest(entries: list[tuple[str, str]]) -> bytes:
+    """SHA-256 over the ``(label, sha256-hex)`` pairs, in the given order."""
     h = hashlib.sha256()
-    for rel, path in sorted(files):
-        with open(path, "rb") as f:
-            h.update(rel.encode("utf-8") + b"\0" + hashlib.sha256(f.read()).digest())
+    for label, hexdigest in entries:
+        h.update(label.encode("utf-8") + b"\0" + bytes.fromhex(hexdigest))
     return h.digest()
+
+
+def summarize_measurement(entries: list[tuple[str, str]]) -> str:
+    """One line: how many items of each kind a measurement covers."""
+    kinds = [label.split(":", 1)[0] for label, _ in entries]
+    dists = {label.split(":")[1] for label, _ in entries if label.startswith("pydist:")}
+    return (f"{kinds.count('janus')} Janus files, {kinds.count('bin')} dc_proxy binary, "
+            f"{len(dists)} Python distributions ({kinds.count('pydist')} files), "
+            f"{kinds.count('app')} application files, {kinds.count('image')} container images")
+
+
+def code_measurement(package_dir: str = _PACKAGE_DIR,
+                     app_paths: Optional[list[str]] = None,
+                     app_images: Optional[list[str]] = None) -> bytes:
+    """SHA-256 identity of what the Backend runs (``code_measurement_entries``)."""
+    return measurement_digest(code_measurement_entries(package_dir, app_paths, app_images))
 
 
 def extend_code_pcr(digest: bytes) -> None:
@@ -664,3 +823,24 @@ def _verify_tpm_quote(quote_msg: bytes, quote_sig: bytes,
     if extra != expected_qd:
         raise ValueError("qualifyingData mismatch: quote is not bound to this "
                          "registration's nonce (+ backend public key)")
+
+
+if __name__ == "__main__":
+    # python3 -m janus.common.snp_attestation [--list] [--app PATH] [--image REF]
+    # prints the value for the frontend's EXPECTED_BACKEND_MEASUREMENT.
+    import argparse
+    ap = argparse.ArgumentParser(
+        description="Print the Backend code measurement (EXPECTED_BACKEND_MEASUREMENT). "
+                    "Run it on a backend set up like the others, with the same "
+                    "JANUS_APP_MEASURE / JANUS_APP_IMAGES settings.")
+    ap.add_argument("--list", action="store_true", help="list every measured item")
+    ap.add_argument("--app", action="append",
+                    help="application file or directory (default: $JANUS_APP_MEASURE)")
+    ap.add_argument("--image", action="append",
+                    help="application container image (default: $JANUS_APP_IMAGES)")
+    args = ap.parse_args()
+    measured = code_measurement_entries(app_paths=args.app, app_images=args.image)
+    if args.list:
+        for item, digest in measured:
+            print(digest, item)
+    print(f"sha256:{measurement_digest(measured).hex()}  ({summarize_measurement(measured)})")

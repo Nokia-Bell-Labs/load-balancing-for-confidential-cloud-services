@@ -11,6 +11,8 @@
 #   MY_NAME       address or DNS name to register as (required; browsers dial it in redirection mode)
 #   PUBLIC_PORT   registered port (8443); CAP=0 disables the 10 req/s cap
 #   SEALED_DIR    /dev/shm/janus-backend-sealed (RAM-backed; design §4.3)
+#   JANUS_APP_MEASURE / JANUS_APP_IMAGES  application paths / container images to include in the
+#                 code measurement (comma-separated; passed to the backend; see janus/README.md)
 # Ports (app): hotel :5000 behind :8543 (DC) / :8544 (X.509); web app :5001 behind :8643 / :8644;
 #              HTTPA/2 :5002; RA+TLS :5004; test application :8080 behind :8443 (DC) / :8444 (X.509)
 set -euo pipefail

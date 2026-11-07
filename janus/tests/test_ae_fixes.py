@@ -400,6 +400,64 @@ def test_as_key_lookup_positive_path():
     print("ok  AS key lookup returns the key on cache hit and on fetch")
 
 
+# ── backend code measurement: what it covers and what it skips ───────────────
+def test_code_measurement():
+    from janus.common import snp_attestation as sa
+    with tempfile.TemporaryDirectory() as td:
+        pkg = Path(td) / "janus"
+        (pkg / "backend" / "dc_proxy" / "boringssl").mkdir(parents=True)
+        (pkg / "backend" / "snpguest").mkdir(parents=True)
+        (pkg / "a.py").write_text("x = 1\n")
+        app = Path(td) / "apps" / "web"
+        app.mkdir(parents=True)
+        (app / "app.py").write_text("print('one')\n")
+
+        def m(**kw):
+            kw.setdefault("app_paths", [])
+            kw.setdefault("app_images", [])
+            return sa.code_measurement(str(pkg), **kw)
+
+        base = m()
+        assert base == m(), "the measurement is deterministic"
+        # third-party checkouts fetched into janus/ are not measured
+        (pkg / "backend" / "dc_proxy" / "boringssl" / "gen.py").write_text("pass\n")
+        (pkg / "backend" / "snpguest" / "tool.py").write_text("pass\n")
+        assert m() == base
+        # a Janus source change is
+        (pkg / "a.py").write_text("x = 2\n")
+        assert m() != base
+        (pkg / "a.py").write_text("x = 1\n")
+        assert m() == base
+        # the dc_proxy binary is measured
+        binary = pkg / "backend" / "dc_proxy" / "dc_proxy"
+        binary.write_bytes(b"\x7fELF-one")
+        with_bin = m()
+        assert with_bin != base
+        binary.write_bytes(b"\x7fELF-two")
+        assert m() != with_bin
+        binary.write_bytes(b"\x7fELF-one")
+        # the configured application is measured, file by file
+        with_app = m(app_paths=["apps/web"])
+        assert with_app != with_bin
+        (app / "app.py").write_text("print('two')\n")
+        assert m(app_paths=["apps/web"]) != with_app
+        # a configured application path that does not exist is an error
+        try:
+            m(app_paths=["apps/missing"])
+            assert False, "missing application path must raise"
+        except FileNotFoundError:
+            pass
+        # the Python distributions of backend/requirements.txt (and their
+        # dependencies) are measured by file
+        (pkg / "backend" / "requirements.txt").write_text("cryptography\n")
+        entries = sa.code_measurement_entries(str(pkg), app_paths=[], app_images=[])
+        dists = {label.split(":")[1] for label, _ in entries if label.startswith("pydist:")}
+        assert any(d.startswith("cryptography==") for d in dists), dists
+        assert sum(1 for label, _ in entries if label.startswith("pydist:cryptography==")) > 10
+        assert sa.measurement_digest(entries) != with_bin
+    print("ok  code measurement: skips fetched checkouts; covers Janus files, dc_proxy, Python deps, application")
+
+
 if __name__ == "__main__":
     test_dc_roundtrip_and_cert_binding()
     test_check_as_trust()
@@ -409,4 +467,5 @@ if __name__ == "__main__":
     test_backend_key_and_renewal()
     test_frontend_restart_skips_issuance()
     test_frontend_resign_and_push()
+    test_code_measurement()
     print("ALL OK")

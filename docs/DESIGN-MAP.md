@@ -50,6 +50,7 @@ There are 29 markers across Python, C and JS.
 | 4: CSR + evidence to the frontend | `BackendServer.register_with_frontend` → `POST /register_backend` |
 | 5: frontend checks nonce freshness and the key binding | `FrontendServer.register_backend` (nonce registered, unused, unexpired: `NONCE_TTL_S`) → `snp_attestation.verify_snp_bundle` → `_verify_tpm_quote` |
 | 6: AS verifies once per registration | `snp_attestation.submit_to_maa` (called from `verify_snp_bundle`) |
+| Backend code identity on SEV-SNP/TDX (the launch measurement covers only Azure's firmware and paravisor) | backend `snp_attestation.code_measurement_entries` (Janus code, `dc_proxy`, Python dependencies, the configured application) → `extend_code_pcr` (vTPM PCR 15) → quote over PCR 15; frontend `verify_snp_bundle(require_code_measurement=True)` → `_verify_code_pcr`, policy `EXPECTED_BACKEND_MEASUREMENT`. The backend measures itself (`janus/README.md`) |
 | 7: redirection mode, DC over the backend key, returned with the frontend chain | `FrontendServer.sign_dc` (format in `janus/common/dc.py`). The backend stores it in its sealed directory as `delegated_credential.bin` (`/dev/shm/janus-backend-sealed` on a CVM, `sealed/` in direct mode) |
 | DC in the TLS `Certificate` message | `dc_proxy` `add_dc_credential` (BoringSSL `SSL_CREDENTIAL_new_delegated`) |
 | Backend irregularities, decommission / compromise: drop from the pool | `handle_mark_cvm`, `handle_stop_cvm` (owner-signed), `select_backend` serves in-service only |

@@ -41,10 +41,36 @@ Frontend and backend are Python ∂(Flask); the TLS-terminating `dc_proxy` and t
 - `sign_dc()` carries the NSS Bug 2018200 workaround (the `algorithm` field is
   placed after the credential in the signed input) so Firefox/NSS accept the DC.
 - Frontend env knobs: `ISSUE_DC=0` skips DC issuance (proxy-only deployments);
-  `EXPECTED_BACKEND_MEASUREMENT=sha256:<hex>` enforces a backend code-measurement
-  admission policy: the digest of the backend's `janus` Python sources, which the
-  backend extends into vTPM PCR 15 and the quote proves (off by default — any
-  proven code measurement is admitted; the backend logs its value at startup).
+  `EXPECTED_BACKEND_MEASUREMENT=sha256:<hex>` enforces a backend admission policy
+  on SEV-SNP/TDX backends (off by default: any proven code measurement is
+  admitted). The backend extends its code measurement into vTPM PCR 15 once per
+  boot, and the quote proves the value of PCR 15. The SNP launch measurement
+  covers only Azure's firmware and paravisor; it is logged, not compared.
+  `deploy/frontend_run.sh` passes the variable to the container, and the
+  enclave manifest passes it on to the frontend.
+- The code measurement (`snp_attestation.code_measurement_entries`) covers:
+  every `.py` file of the `janus` package, except the BoringSSL and snpguest
+  checkouts that the setup fetches into it; the `dc_proxy` binary (BoringSSL is
+  linked into it); the files of the Python distributions in
+  `backend/requirements.txt` and of their dependencies; and the application:
+  the files and directories in `JANUS_APP_MEASURE` and the container image IDs
+  in `JANUS_APP_IMAGES` (comma-separated, set on the backend). All backends of
+  a pool need the same code, dependencies and application settings.
+- Python dependencies that are not pinned can resolve to other versions on a
+  backend that is set up later, and then the measurement differs. Set up all
+  backends of a pool from the same package versions.
+- To get the value for the policy, run
+  `python3 -m janus.common.snp_attestation --list` on a backend that is set up
+  like the others, with the same `JANUS_APP_*` settings. The backend also logs
+  the value at startup (`Code measurement sha256:<hex> (PCR 15)`). A changed
+  measurement needs a reboot of the CVM, because PCR 15 records one
+  measurement per boot.
+- Scope: the backend measures itself. The check detects a backend whose code,
+  dependencies or application differ from the approved ones. It does not
+  detect code that reports a false value. A measured boot chain that would
+  close this is future work.
+- A changed policy applies to new registrations. Backends already in the pool
+  stay until the pool is reset (`deploy/README.md`, section 2).
 
 Build/run the whole stack from the repo root README; SGX packaging is in
 `../gramine/` and the CA in `../ca/`.
