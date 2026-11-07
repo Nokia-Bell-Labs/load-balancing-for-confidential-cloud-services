@@ -62,13 +62,15 @@ else
     echo "[Step 0b/7] No patch file found, skipping"
 fi
 
-# Step 0c: Build ratls-external if not already built
-if [ ! -d "${RATLS_OPENSSL_DIR}" ]; then
+# Step 0c: Build ratls-external if not already built (the marker is written only after a complete bootstrap, so an
+# interrupted build is resumed instead of skipped)
+if [ ! -f "${RATLS_EXTERNAL_DIR}/.bootstrap-done" ]; then
     echo ""
     echo "[Step 0c/7] Building ratls-external (OpenSSL, libsodium, TPM2 TSS)..."
     echo "  This may take 10-15 minutes..."
     cd "${RATLS_EXTERNAL_DIR}"
     make bootstrap
+    touch "${RATLS_EXTERNAL_DIR}/.bootstrap-done"
     echo "✅ ratls-external built successfully"
 else
     echo ""

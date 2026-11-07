@@ -19,7 +19,11 @@ set -euo pipefail
 ROLE="${1:?pool|app}"; FRONTEND_URL="${FRONTEND_URL:?}"; MY_NAME="${MY_NAME:?}"; PUBLIC_PORT="${PUBLIC_PORT:-8443}"
 SEALED_DIR="${SEALED_DIR:-/dev/shm/janus-backend-sealed}"; CAP="${CAP:-1}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; cd "$ROOT"
-sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential cmake git python3-pip pkg-config >/dev/null 2>&1
+# the package lists of a fresh CVM image lack universe (python3-pip, docker-compose-v2); wait for the apt lock that
+# unattended-upgrades can hold after boot
+APT="sudo DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600"
+$APT update -qq >/dev/null
+$APT install -y -qq build-essential cmake git python3-pip pkg-config >/dev/null
 python3 -c "import flask, cryptography, requests" 2>/dev/null || pip3 install -q -r janus/backend/requirements.txt
 command -v snpguest >/dev/null || bash janus/backend/fetch_snp_tools.sh          # snpguest (pinned) + tpm2-tools: the SEV-SNP evidence path
 [ -d janus/backend/dc_proxy/boringssl ] || bash janus/backend/dc_proxy/fetch_boringssl.sh   # pinned BoringSSL + boringssl-dc.patch
@@ -43,11 +47,17 @@ if [ "$ROLE" = app ]; then
   [ -f be.crt ] || { openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout be.key -out be.csr -subj "/CN=$MY_NAME" 2>/dev/null
     printf "subjectAltName=DNS:%s\nbasicConstraints=CA:FALSE\n" "$MY_NAME" > ext.cnf; openssl x509 -req -in be.csr -CA ca.crt -CAkey ca.key -CAcreateserial -days 825 -extfile ext.cnf -out be.crt 2>/dev/null; }
   cd "$ROOT"
-  command -v docker >/dev/null || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq docker.io docker-compose-v2 >/dev/null 2>&1
+  command -v docker >/dev/null || $APT install -y -qq docker.io docker-compose-v2 >/dev/null
   [ -d apps/microservice_app/DeathStarBench ] || bash apps/microservice_app/fetch.sh     # pinned, unmodified
   # the checkout's compose file names deathstarbench/hotel-reservation:latest; pin the image the paper's testbed ran (docs/DEPENDENCIES.md)
   sudo docker image inspect deathstarbench/hotel-reservation:latest >/dev/null 2>&1 || { sudo docker pull -q deathstarbench/hotel-reservation@sha256:488d8980c81eeae337d089185f2dd2643dec589809e102c2abf65a4d6e9bb436 && sudo docker tag deathstarbench/hotel-reservation@sha256:488d8980c81eeae337d089185f2dd2643dec589809e102c2abf65a4d6e9bb436 deathstarbench/hotel-reservation:latest; }
-  sudo docker ps --format '{{.Names}}' | grep -q hotelreservation-frontend || (cd apps/microservice_app/DeathStarBench/hotelReservation &&  sudo docker compose up -d --no-build >/dev/null 2>&1)
+  # The pinned compose file also defines review and attractions, whose images must be built locally (--no-build cannot
+  # create them). /reservation, the request the benchmarks measure, does not use them: start every other service.
+  if ! sudo docker ps --format '{{.Names}}' | grep -q hotelreservation-frontend; then
+    (cd apps/microservice_app/DeathStarBench/hotelReservation && sudo docker compose up -d --no-build \
+       $(sudo docker compose config --services 2>/dev/null | grep -vxE 'review|attractions|mongodb-review|memcached-review|mongodb-attractions') \
+       > /tmp/hotel-compose.log 2>&1) || { echo "the hotelReservation stack did not start; see /tmp/hotel-compose.log"; exit 1; }
+  fi
   pgrep -f "apps/browser_app/app.py --port 5001" >/dev/null || { setsid nohup python3 apps/browser_app/app.py --port 5001 --bind 127.0.0.1 > /tmp/webapp.log 2>&1 < /dev/null & }
   front 8444 --backend 127.0.0.1:8080 --x509-cert "$HOME/vanilla-ca/van.crt" --x509-key "$HOME/vanilla-ca/van.key"
   front 8543 --backend 127.0.0.1:5000 --sealed-dir "$SEALED_DIR"
@@ -55,7 +65,14 @@ if [ "$ROLE" = app ]; then
   front 8643 --backend 127.0.0.1:5001 --sealed-dir "$SEALED_DIR"
   front 8644 --backend 127.0.0.1:5001 --x509-cert "$HOME/vanilla-ca/be.crt" --x509-key "$HOME/vanilla-ca/be.key"
   pgrep -f "httpa/server.py --port 5002" >/dev/null || { HOTEL_URL=http://127.0.0.1:5000 setsid nohup python3 baselines/httpa/httpa/server.py --port 5002 --cert "$HOME/vanilla-ca/van.crt" --key "$HOME/vanilla-ca/van.key" > /tmp/httpa.log 2>&1 < /dev/null & }
-  [ -x baselines/python-ratls/bin/python3 ] || bash baselines/ratls/build_python_with_ratls.sh > /tmp/python-ratls-build.log 2>&1
+  # the RA+TLS interpreter: its OpenSSL/libsodium/TPM2-TSS bootstrap needs the autotools; same build packages as
+  # deploy/client_setup.sh installs on the client
+  $APT install -y -qq libtool autoconf automake libssl-dev libffi-dev zlib1g-dev libbz2-dev libreadline-dev \
+    libsqlite3-dev liblzma-dev libnss3-dev patchelf >/dev/null
+  [ -x baselines/python-ratls/bin/python3 ] || bash baselines/ratls/build_python_with_ratls.sh > /tmp/python-ratls-build.log 2>&1 \
+    || { echo "building the RA+TLS interpreter failed; see /tmp/python-ratls-build.log"; exit 1; }
+  # the RA+TLS server imports the bridge module of ratls/server; build it as deploy/client_setup.sh does on the client
+  ls baselines/ratls/server/ratls_bridge*.so >/dev/null 2>&1 || (cd baselines/ratls/server && ../../python-ratls/bin/python3 setup.py build_ext --inplace > /tmp/ratls-bridge-build.log 2>&1)
   # the RA+TLS bridge spawns the SNP evidence helper; point it at this checkout (its compiled-in fallback path is not ours)
   pgrep -f "ratls_http_server.py --port 5004" >/dev/null || (cd baselines && HOTEL_URL=http://127.0.0.1:5000 PYTHONPATH="$ROOT" APP_HOME="$HOME" RATLS_BUNDLE_CLI="$ROOT/janus/common/snp_bundle_cli.py" setsid nohup python-ratls/bin/python3 ratls/server/ratls_http_server.py --port 5004 --type snp > /tmp/ratls.log 2>&1 < /dev/null &)
 fi

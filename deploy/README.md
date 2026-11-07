@@ -27,8 +27,10 @@ Note: `/etc/hosts` entries do not reach the enclave.
 
 ```sh
 deploy/install_vm_dependencies.sh       # SGX driver/DCAP, Docker, Go, Node, Gramine build deps (Ubuntu 22.04)
-ca/fetch_pebble.sh                      # the CA: Pebble v2.9.0 + ca/pebble-janus.patch, started as a container
+newgrp docker                           # or log in again: picks up the docker group and Go on the PATH
+ca/fetch_pebble.sh                      # the CA: Pebble v2.9.0 + ca/pebble-janus.patch and its CA chain (bundled into the frontend image)
 docker build -f janus/frontend/Dockerfile -t janus/frontend .
+make -C gramine gramine-image                       # the Gramine 1.7 base image janus/gramine (once)
 make -C gramine signed-image MODULE=frontend        # -> janus/frontend-graminized (new MRENCLAVE per build)
 EXTRA_SANS=<service-name>,<backend-name> deploy/frontend_run.sh    # the DNS names browsers dial (service + web-app backend);
                                                                  # SEALED_DIR, FRONTEND_PORT optional (see the script)
@@ -39,6 +41,10 @@ runs. The sealed directory keeps the identity of the frontend across
 restarts (design §4.2). Delete the contents of the sealed directory to force
 a new certificate. A new certificate is necessary after you change the SANs
 or rebuild the image.
+
+Each build has its own MRENCLAVE. The frontend logs it at startup:
+`docker logs janus-frontend 2>&1 | grep MRENCLAVE`. The client needs it
+(section 3).
 
 ## 2. Backend CVM
 
@@ -104,10 +110,11 @@ FRONTEND_HOST=<frontend> BACKEND_HOST=<application backend> CA_ROOT_PEM=<the CA 
 - It builds the NSS DC client and its trust database.
 - It builds the RA+TLS interpreter (`baselines/ratls/build_python_with_ratls.sh`).
 - It installs Firefox ESR and geckodriver with an enterprise policy that trusts the CA.
-- It packages the browser extension.
+- It installs Node.js LTS from NodeSource and packages the browser extension.
 - It writes `eval/ae/testbed.env` from the values you pass.
 
-Then run `eval/ae/check_testbed.sh`.
+Set `EXPECTED_MRENCLAVE` in `eval/ae/testbed.env` to the MRENCLAVE of your
+frontend (section 1). Then run `eval/ae/check_testbed.sh`.
 
 Two files come from the operator. The first file is the CA root that the
 frontend certificate chains to. It is `ca/pebble/ca_certs/root-ca.pem` on

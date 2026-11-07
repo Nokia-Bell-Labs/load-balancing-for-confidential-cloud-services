@@ -13,7 +13,15 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"; cd "$ROOT"; FRONTEND_PORT="${FRONTEND_
 sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential pkg-config git wget curl libnss3-dev libnss3-tools \
   python3-pip libffi-dev zlib1g-dev libbz2-dev libreadline-dev libsqlite3-dev liblzma-dev libssl-dev libtool autoconf automake \
-  iproute2 patchelf libgtk-3-0 libdbus-glib-1-2 libasound2 libx11-xcb1 libxt6 nodejs npm >/dev/null 2>&1
+  iproute2 patchelf libgtk-3-0 libdbus-glib-1-2 libasound2 libx11-xcb1 libxt6 >/dev/null 2>&1
+# Node.js for the browser extension (step 3): web-ext 7 needs Node.js >= 14, and Ubuntu 22.04 ships 12. Install the current
+# LTS from NodeSource, as deploy/install_vm_dependencies.sh does. Ubuntu's npm and libnode-dev conflict with that package,
+# so remove them if present.
+if ! node -e 'process.exit(+process.versions.node.split(".")[0] >= 14 ? 0 : 1)' 2>/dev/null; then
+  sudo DEBIAN_FRONTEND=noninteractive apt-get remove -y -qq npm libnode-dev >/dev/null 2>&1 || true
+  curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash - >/dev/null 2>&1
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nodejs >/dev/null 2>&1
+fi
 sudo pip3 install -q -r eval/requirements.txt
 # 1. NSS DC client + trust database with the CA root
 make -s -C janus/client/native
@@ -22,7 +30,10 @@ mkdir -p "$HOME/nss_client/nssdb"; cp -f janus/client/native/nss_dc_helper "$HOM
 certutil -L -d "sql:$HOME/nss_client/nssdb" | grep -q janus-root || certutil -A -d "sql:$HOME/nss_client/nssdb" -n janus-root -t "CT,C,C" -i "$CA_ROOT_PEM"
 # 2. RA+TLS interpreter (Python 3.10 + the RA+TLS OpenSSL, pinned + patched) and its bridge
 [ -x baselines/python-ratls/bin/python3 ] || bash baselines/ratls/build_python_with_ratls.sh > "$HOME/python-ratls-build.log" 2>&1
-baselines/python-ratls/bin/python3 -m pip install -q pyyaml==5.4.1 cryptography==50.0.1 requests==2.34.2 urllib3==2.8.0
+# PyYAML 5.4.1 has no wheel for Python 3.10 and does not build with Cython 3: build it against an older Cython
+baselines/python-ratls/bin/python3 -m pip install -q 'cython<3' wheel
+baselines/python-ratls/bin/python3 -m pip install -q --no-build-isolation pyyaml==5.4.1
+baselines/python-ratls/bin/python3 -m pip install -q cryptography==50.0.1 requests==2.34.2 urllib3==2.8.0
 (cd baselines/ratls/server && ../../python-ratls/bin/python3 setup.py build_ext --inplace >/dev/null 2>&1)
 # 3. Firefox ESR + geckodriver + the extension, trusting the CA root and the frontend's intermediate via enterprise policy
 mkdir -p "$HOME/browser_bench" "$HOME/downloads"
@@ -38,7 +49,8 @@ CERTS="\"$HOME/browser_bench/janus-root.pem\", \"$HOME/browser_bench/janus-inter
 [ -n "${VANILLA_CA_PEM:-}" ] && { cp -f "$VANILLA_CA_PEM" "$HOME/browser_bench/vanilla-ca.pem"; CERTS="$CERTS, \"$HOME/browser_bench/vanilla-ca.pem\""; certutil -L -d "sql:$HOME/nss_client/nssdb" | grep -q vanilla-ca || certutil -A -d "sql:$HOME/nss_client/nssdb" -n vanilla-ca -t "CT,C,C" -i "$VANILLA_CA_PEM"; }
 mkdir -p "$HOME/firefox/distribution"
 printf '{ "policies": { "Certificates": { "Install": [ %s ] }, "DisableAppUpdate": true, "DisableTelemetry": true } }\n' "$CERTS" > "$HOME/firefox/distribution/policies.json"
-(cd janus/client/browser_extension && npm install --silent >/dev/null 2>&1 && npm run package >/dev/null 2>&1 && cp -f dist/*.zip "$HOME/browser_bench/ctls-ext.xpi")
+(cd janus/client/browser_extension && npm install --silent && npm run package && cp -f dist/*.zip "$HOME/browser_bench/ctls-ext.xpi") \
+  > "$HOME/browser-extension-build.log" 2>&1 || { echo "packaging the browser extension failed; see $HOME/browser-extension-build.log"; exit 1; }
 # 4. the endpoint file the wrappers read (eval/configs/env.yaml is rendered from it)
 sed -e "s|^FRONTEND_HOST=.*|FRONTEND_HOST=$FRONTEND_HOST|" -e "s|^FRONTEND_PORT=.*|FRONTEND_PORT=$FRONTEND_PORT|" \
     -e "s|^BACKEND_HOST=.*|BACKEND_HOST=$BACKEND_HOST|" -e "s|^RATLS_HOST=.*|RATLS_HOST=${RATLS_HOST:-$BACKEND_HOST}|" -e "s|^HTTPA_HOST=.*|HTTPA_HOST=${HTTPA_HOST:-$BACKEND_HOST}|" \
