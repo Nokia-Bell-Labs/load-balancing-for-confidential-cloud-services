@@ -4,22 +4,21 @@
   SPDX-License-Identifier: BSD-3-Clause-Clear
 -->
 
-# Janus Artifact
-
-If you have any questions or need help, please don't hesitate to reach out to
-the authors. We are happy to help!
+# Janus: Practical Load Balancing for Confidential Cloud Services
 
 ## Overview
 
-This repository is the artifact of the paper **"Janus: Practical Load
-Balancing for Confidential Cloud Services"** (Qi Guo, Alice Dethise, Ruichuan
-Chen, Istemi Ekin Akkus, Ivica Rimac, Lieven Trappeniers), ACM SIGOPS ATC '26.
+This repository contains Janus, the load-balancing architecture of the paper
+**"Janus: Practical Load Balancing for Confidential Cloud Services"** (Qi Guo,
+Alice Dethise, Ruichuan Chen, Istemi Ekin Akkus, Ivica Rimac, Lieven
+Trappeniers), ACM SIGOPS ATC '26. It was evaluated as the artifact of the paper.
+For questions, please contact the authors.
 
 The repository contains:
 
-- the evaluation scripts that reproduce the tables and figures of the paper on
-  the testbed we provide,
 - the source code of Janus and of every system it is compared against,
+- the scripts that deploy a testbed on Microsoft Azure (`deploy/`),
+- the evaluation scripts that reproduce the tables and figures of the paper,
 - the scripts that draw the figures of the paper from the data of a run.
 
 The repository ships no measurement data. Every number and every figure comes
@@ -53,20 +52,21 @@ clients and browsers work with Janus, in proxy mode and in redirection mode.
 | `apps/` | the three application workloads (web app, LLM server, microservice application) and the list of every external dependency with its pinned version |
 | `plotting/` | the scripts that draw the figures of the paper from the data of a run |
 | `ca/`, `gramine/` | the certificate authority of the testbed and the SGX packaging of the frontend |
-| `deploy/` | scripts that build the whole testbed from scratch on other machines |
+| `deploy/` | scripts that build a testbed on your own Azure machines |
 | `docs/` | testbed access (`docs/ACCESS.md`) and troubleshooting |
 | `ARTIFACT.md` | every claim of the paper: the experiment, the command, the duration and the expected numbers |
 | `docs/DESIGN-MAP.md` | where each design element of the paper is implemented |
 
 ## Prerequisites
 
-**Important note**: the experiments need Intel SGX machines, AMD SEV-SNP
-confidential VMs and a cloud attestation service. All scripts are written for
-the **testbed we provide on Microsoft Azure**, and we tested them there. The
-testbed is the environment the numbers of the paper come from (see
-"Environment" below). You get an account on the client machine of the testbed.
-We operate the servers. You do not configure anything on the client: the
-repository is checked out there, with the testbed addresses filled in.
+**Important note**: Janus needs Intel SGX machines, AMD SEV-SNP confidential
+VMs and a cloud attestation service. All scripts are written for **Microsoft
+Azure**, and we tested them there. You can build your own testbed with
+`deploy/` (see `deploy/README.md`). For the artifact evaluation we provided the
+testbed that the numbers of the paper come from (see "Environment" below):
+evaluators got an account on its client machine, and we operated the servers.
+The instructions below describe that setup. On a testbed of your own, run the
+same scripts on your client VM.
 
 On your own computer you need only:
 
@@ -79,7 +79,7 @@ On your own computer you need only:
   needs no privileges.
 - On the client VM, the experiment scripts run `sudo tc` to add and remove a
   `netem` delay on the network interface of the VM. This delay emulates the
-  RTTs. The evaluator account can run only `tc` with `sudo`. Every script
+  RTTs. The client account can run only `tc` with `sudo`. Every script
   removes the delay when it exits. Nothing else on the client changes.
 - The evaluation scripts never change the servers.
 - The `deploy/` scripts rebuild the testbed on your own machines. They are the
@@ -89,8 +89,8 @@ On your own computer you need only:
 
 ## How the Evaluation Works
 
-**The testbed.** We keep the testbed of the paper up on Microsoft Azure for
-the whole review period. It has four kinds of machines:
+**The testbed.** The testbed of the paper runs on Microsoft Azure. It has four
+kinds of machines:
 
 ```
  your laptop ──SSH──▶ client VM ──┬──▶ frontend (Intel SGX enclave, Gramine)      :6037  registration, /route, proxy mode
@@ -155,7 +155,10 @@ numbers to expect.
 
 ### Step 1: Get testbed access
 
-Post two items in the HotCRP artifact thread:
+If you built your own testbed with `deploy/`, skip Steps 1 and 2 and run the
+steps of this README on your client VM with `eval/ae/ae.py -m <step>`.
+
+To use a testbed that we provide, please contact the authors with two items:
 
 1. an **SSH public key**, and
 2. the **IPv4 range you will connect from**. A /24 is enough, for example
@@ -163,7 +166,7 @@ Post two items in the HotCRP artifact thread:
    not want to reveal your network, connect through a VPN or a small cloud
    jump host and give us that range. We can change the range at any time.
 
-We reply in the thread with the address of the client VM. Only one evaluator
+We reply with the address of the client VM. Only one user
 can use the testbed at a time, so please also tell us when you plan to run.
 Half a day is enough for everything. See `docs/ACCESS.md` for details.
 
@@ -181,11 +184,13 @@ Host janus-client
 
 ### Step 3: Get the code and check the testbed
 
-Clone this repository on your computer, at the evaluated tag:
+Clone this repository on your computer and check out the evaluated version
+(tag `atc26-ae`, commit `d24c762`):
 
 ```sh
-git clone --branch atc26-ae https://github.com/Nokia-Bell-Labs/load-balancing-for-confidential-cloud-services.git janus-artifact
+git clone https://github.com/Nokia-Bell-Labs/load-balancing-for-confidential-cloud-services.git janus-artifact
 cd janus-artifact
+git checkout d24c762
 ```
 
 If the clone does not work, copy the same version from the client VM:
@@ -206,7 +211,7 @@ checks confirm that every server answers and that the SGX attestation of the
 frontend verifies from the client VM. They also list the pool of admitted
 backends. The output ends with `17 checks passed, 0 failed`.
 
-### Quick start (kick-the-tires, 5 minutes)
+### Quick start (5 minutes)
 
 ```sh
 RUN=kick eval/ae/ae-remote.sh janus-client data -e table1,table3   # 2 min: Table 1's live part and Table 3, measured
@@ -270,7 +275,7 @@ results land in one run:
 | `fig6` | Fig. 6, the whole curve in one run: the sustained throughput of proxy mode and redirection mode at N = 32, 16, 8, 4, 2 and 1 backends, plus the single-server baselines at N = 1 (rate-capped as in the paper). The 32 backend CVMs are up during your slot. The script asks our profile service for each size in turn and waits until the frontend shows that many backends in service (3 to 6 minutes per resize). You run one command. | about 1.5 h |
 | `fig7c` | Fig. 7(c): the end-to-end latency of the microservice application under the five protocols (profile *hotel*) | 5 min |
 | `fig7a` | Fig. 7(a): the page-load time in a real Firefox with the Janus extension, for vanilla TLS, redirection mode and proxy mode (profile *browser*) | 3 min |
-| `fig7b` | Fig. 7(b): the LLM time-to-first-token on a confidential H100 VM. **Separate, on-request option**: the H100 CVM is expensive. It is not part of the standing testbed and not part of any default run. Ask in the thread and we bring it up for your window (profile *gpu*). Then run `-e fig7b`. | 20 min |
+| `fig7b` | Fig. 7(b): the LLM time-to-first-token on a confidential H100 VM. **Separate, on-request option**: the H100 CVM is expensive. It is not part of the standing testbed and not part of any default run. Please contact the authors to bring it up for your window (profile *gpu*). Then run `-e fig7b`. | 20 min |
 
 ```sh
 RUN=<your run id> eval/ae/ae-remote.sh janus-client data            # everything except the LLM run, about 3 h; the pool switches itself
@@ -374,13 +379,13 @@ script requests itself. With the optional LLM run, plan half a day.
   copy the logs. The `manifest.json` of the run records the status and the
   exit code of each experiment.
 - A profile request that fails means that our profile service did not answer
-  or could not switch the pool. Post in the thread, then run the same command
+  or could not switch the pool. Please contact the authors, then run the same command
   again; it resumes where it stopped.
 - When you run `data` again with the same `RUN=`, the driver resumes. It skips
   the experiments that succeeded and runs the failed ones again.
 - `docs/TROUBLESHOOTING.md` covers the problems we have seen: a slow
   attestation service, a backend that left the pool, DNS on the client. For
-  anything else, post in the thread. We answer within the day.
+  other questions, please contact the authors.
 
 ## Output Directories
 
@@ -418,7 +423,25 @@ A script next to each external dependency fetches it from its official
 repository at a pinned version. Every change we make to a dependency is a
 patch file next to that script. `docs/DEPENDENCIES.md` lists them. All raw
 output of a full run is less than 1 GB. `deploy/README.md` gives one script
-for each role to build the testbed from scratch on other machines.
+for each role to build a testbed on your own Azure machines.
+
+## Citation
+
+If you use Janus in your work, please cite the paper:
+
+```bibtex
+@inproceedings{guo2026janus,
+  author    = {Qi Guo and Alice Dethise and Ruichuan Chen and Istemi Ekin Akkus and Ivica Rimac and Lieven Trappeniers},
+  title     = {Janus: Practical Load Balancing for Confidential Cloud Services},
+  booktitle = {The 2026 ACM SIGOPS Annual Technical Conference (SIGOPS ATC 2026)},
+  year      = {2026},
+  month     = nov,
+  address   = {Hong Kong, China},
+  publisher = {ACM},
+  doi       = {10.1145/3828523.3857052},
+  isbn      = {979-8-4007-2818-1}
+}
+```
 
 ## License
 
