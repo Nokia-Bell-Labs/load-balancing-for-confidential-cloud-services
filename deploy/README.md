@@ -82,19 +82,32 @@ the same and adds what the application workloads need:
 The script header lists the ports. You can re-run either mode. Both modes
 are idempotent.
 
-By default the frontend admits every backend whose attestation verifies. To
-admit only backends that run the approved code, start the frontend with
-`EXPECTED_BACKEND_MEASUREMENT=sha256:<hex>` (`frontend_run.sh` passes it to
-the enclave). The value is the code measurement that a backend logs at
-startup (`Code measurement sha256:<hex> (PCR 15)`), or that
-`python3 -m janus.common.snp_attestation` prints on it. It covers the Janus
-code, `dc_proxy` and the Python dependencies. To include the application,
-export `JANUS_APP_MEASURE` (application files or directories, relative to the
-repository root) and `JANUS_APP_IMAGES` (container images) before
-`backend_setup.sh`, with the same values on every backend. See
-`janus/README.md` for what the measurement covers. PCR 15 records one
-measurement per boot: after a change of the measured code or application,
-reboot the CVM before you start the backend again.
+The frontend admits a backend only if Azure Attestation reports a compliant,
+non-debuggable SEV-SNP CVM. It also records two measurements of the backend:
+the Janus code and the application. By default it accepts any value that the
+quote proves. To admit only approved code, start the frontend with
+`EXPECTED_JANUS_MEASUREMENT=sha256:<hex>` and
+`EXPECTED_APP_MEASUREMENT=sha256:<hex>` (`frontend_run.sh` passes them to the
+enclave). Leave `EXPECTED_CVM_MEASUREMENT` unset on Azure.
+
+To get the two values, run `python3 -m janus.common.snp_attestation` on a
+backend set up from the release and the application. A backend also logs them
+at startup (`Janus measurement sha256:<hex>` and `Application measurement
+sha256:<hex>`).
+
+- **Janus measurement.** It covers the Janus code, `dc_proxy`, `snpguest`, the
+  backend setup scripts and the Python dependencies.
+- **Application measurement.** It covers the files and directories in
+  `JANUS_APP_MEASURE` (relative to the repository root) and the container
+  images in `JANUS_APP_IMAGES`. `app` defaults to the hotelReservation stack
+  and the web app. `pool` measures no application. Use the same values on
+  every backend.
+
+See `janus/README.md` for what each measurement covers and for the limitations.
+This testbed gives the operator SSH and `sudo`, so its measurements are not a
+protection against the operator. PCR 15 records the measurements once per
+boot. After the measured code or application changes, reboot the CVM before
+you start the backend again.
 
 ## 3. Client
 

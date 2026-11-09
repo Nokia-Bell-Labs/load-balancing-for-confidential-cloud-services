@@ -66,11 +66,13 @@ References:
 from __future__ import annotations
 
 import base64
+import glob
 import hashlib
 import json
 import logging
 import os
 import re
+import shutil
 import struct
 import subprocess
 import tempfile
@@ -98,10 +100,11 @@ HCL_HEADER_LEN = 32
 SNP_REPORT_LEN = 1184      # AMD SEV-SNP report payload size
 RUNTIME_HDR_LEN = 20       # DataSize|Version|ReportType|HashType|ClaimSize
 
-# Backend code measurement: the Backend extends SHA-256 PCR 15 once per boot
-# with code_measurement() and quotes only that PCR at registration.  The SNP
-# launch measurement covers Azure's HCL/paravisor, not the guest, so it is
-# reported for information only.
+# Backend code measurement: once per boot the Backend extends SHA-256 PCR 15
+# with the Janus measurement, then the application measurement, and quotes
+# only that PCR at registration.  The SNP launch measurement covers Azure's
+# HCL/paravisor, not the guest: it is the CVM hash, compared only with an
+# explicit expected value.
 CODE_PCR = 15
 CODE_PCR_SELECTION = f"sha256:{CODE_PCR}"
 TPM_ST_ATTEST_QUOTE = 0x8018
@@ -112,6 +115,14 @@ _PACKAGE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # scripts are not Backend code (BoringSSL is measured as part of dc_proxy).
 _MEASURE_SKIP_DIRS = frozenset({"__pycache__", "boringssl", "snpguest"})
 _ABSENT_DIGEST = hashlib.sha256(b"absent").hexdigest()
+# Janus scripts that set up and start the Backend, relative to the repository root.
+_JANUS_SCRIPTS = ("deploy/backend_setup.sh", "janus/backend/*.sh")
+# What Azure Attestation must state about the CVM; the guest has no expected value on Azure.
+PLATFORM_CLAIMS = {
+    "x-ms-attestation-type": "sevsnpvm",
+    "x-ms-compliance-status": "azure-compliant-cvm",
+    "x-ms-sevsnpvm-is-debuggable": False,
+}
 
 
 # -----------------------------------------------------------------------------
@@ -125,7 +136,7 @@ class SnpEvidence:
     pem_chain:     bytes        # VCEK leaf || ASK || ARK, PEM concatenation
     tpm_quote_msg: bytes = b""  # for per-connection nonce binding
     tpm_quote_sig: bytes = b""  # signature over quote_msg by vTPM AK
-    code_digest:   bytes = b""  # the PCR 15 event (code_measurement); optional 5th field
+    code_digest:   bytes = b""  # the two PCR 15 events, Janus || application (64 B); optional 5th field
 
 
 def _run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
@@ -356,29 +367,22 @@ def _image_entries(images: list[str]) -> list[tuple[str, str]]:
     return entries
 
 
-def code_measurement_entries(package_dir: str = _PACKAGE_DIR,
-                             app_paths: Optional[list[str]] = None,
-                             app_images: Optional[list[str]] = None
-                             ) -> list[tuple[str, str]]:
-    """Everything the Backend code measurement covers, as sorted
-    ``(label, sha256-hex)`` pairs:
+def janus_measurement_entries(package_dir: str = _PACKAGE_DIR,
+                              snpguest: Optional[str] = None
+                              ) -> list[tuple[str, str]]:
+    """Everything the Janus measurement covers, as sorted ``(label,
+    sha256-hex)`` pairs:
 
     - ``janus:``  every ``.py`` file of the ``janus`` package, except the
       third-party checkouts that the setup fetches into it (BoringSSL for
       dc_proxy, snpguest): their scripts never run in the Backend;
-    - ``bin:``    the dc_proxy binary (with BoringSSL linked in), if built;
+    - ``bin:``    the dc_proxy binary (with BoringSSL linked in) and the
+      snpguest binary (``snpguest``, default: the one on ``PATH``), if present;
+    - ``script:`` the Janus scripts that set up and start the Backend;
     - ``pydist:`` the files of the Python distributions in
-      ``backend/requirements.txt`` and of their dependencies;
-    - ``app:``    the files of the application paths (``JANUS_APP_MEASURE``);
-    - ``image:``  the image IDs of the application containers
-      (``JANUS_APP_IMAGES``).
-
-    ``app_paths``/``app_images`` default to these comma-separated variables.
+      ``backend/requirements.txt`` and of their dependencies.
     """
-    if app_paths is None:
-        app_paths = _env_list("JANUS_APP_MEASURE")
-    if app_images is None:
-        app_images = _env_list("JANUS_APP_IMAGES")
+    root = os.path.dirname(package_dir)
     entries = []
     for top, dirs, names in os.walk(package_dir):
         dirs[:] = [d for d in dirs if d not in _MEASURE_SKIP_DIRS]
@@ -390,12 +394,38 @@ def code_measurement_entries(package_dir: str = _PACKAGE_DIR,
     dc_proxy = os.path.join(package_dir, "backend", "dc_proxy", "dc_proxy")
     if os.path.isfile(dc_proxy):
         entries.append(("bin:dc_proxy", _file_sha256(dc_proxy)))
+    snpguest = snpguest if snpguest is not None else shutil.which("snpguest")
+    if snpguest and os.path.isfile(snpguest):
+        entries.append(("bin:snpguest", _file_sha256(snpguest)))
+    for pattern in _JANUS_SCRIPTS:
+        for path in sorted(glob.glob(os.path.join(root, pattern))):
+            rel = os.path.relpath(path, root).replace(os.sep, "/")
+            entries.append((f"script:{rel}", _file_sha256(path)))
     requirements = os.path.join(package_dir, "backend", "requirements.txt")
     if os.path.isfile(requirements):
         entries += _python_dist_entries(requirements)
-    entries += _app_entries(app_paths, os.path.dirname(package_dir))
-    entries += _image_entries(app_images)
     return sorted(entries)
+
+
+def app_measurement_entries(app_paths: Optional[list[str]] = None,
+                            app_images: Optional[list[str]] = None,
+                            root: str = os.path.dirname(_PACKAGE_DIR)
+                            ) -> list[tuple[str, str]]:
+    """Everything the application measurement covers, as sorted ``(label,
+    sha256-hex)`` pairs:
+
+    - ``app:``    the files of the application paths (``JANUS_APP_MEASURE``),
+      relative to ``root`` (the repository root) or absolute;
+    - ``image:``  the image IDs of the application containers
+      (``JANUS_APP_IMAGES``).
+
+    ``app_paths``/``app_images`` default to these comma-separated variables.
+    """
+    if app_paths is None:
+        app_paths = _env_list("JANUS_APP_MEASURE")
+    if app_images is None:
+        app_images = _env_list("JANUS_APP_IMAGES")
+    return sorted(_app_entries(app_paths, root) + _image_entries(app_images))
 
 
 def measurement_digest(entries: list[tuple[str, str]]) -> bytes:
@@ -410,33 +440,41 @@ def summarize_measurement(entries: list[tuple[str, str]]) -> str:
     """One line: how many items of each kind a measurement covers."""
     kinds = [label.split(":", 1)[0] for label, _ in entries]
     dists = {label.split(":")[1] for label, _ in entries if label.startswith("pydist:")}
-    return (f"{kinds.count('janus')} Janus files, {kinds.count('bin')} dc_proxy binary, "
-            f"{len(dists)} Python distributions ({kinds.count('pydist')} files), "
-            f"{kinds.count('app')} application files, {kinds.count('image')} container images")
+    bins = [label.split(":", 1)[1] for label, _ in entries if label.startswith("bin:")]
+    parts = []
+    if kinds.count("janus") or bins or kinds.count("script") or dists:
+        parts += [f"{kinds.count('janus')} Janus files",
+                  f"binaries: {', '.join(bins) or 'none'}",
+                  f"{kinds.count('script')} setup scripts",
+                  f"{len(dists)} Python distributions ({kinds.count('pydist')} files)"]
+    if kinds.count("app") or kinds.count("image"):
+        parts += [f"{kinds.count('app')} application files",
+                  f"{kinds.count('image')} container images"]
+    return ", ".join(parts) or "nothing"
 
 
-def code_measurement(package_dir: str = _PACKAGE_DIR,
-                     app_paths: Optional[list[str]] = None,
-                     app_images: Optional[list[str]] = None) -> bytes:
-    """SHA-256 identity of what the Backend runs (``code_measurement_entries``)."""
-    return measurement_digest(code_measurement_entries(package_dir, app_paths, app_images))
+def code_pcr_value(janus_digest: bytes, app_digest: bytes) -> bytes:
+    """PCR 15 after the two events of a boot: Janus, then the application."""
+    return _extend(_extend(_ZERO_PCR, janus_digest), app_digest)
 
 
-def extend_code_pcr(digest: bytes) -> None:
-    """Record ``digest`` as the single PCR 15 event of this boot.  A restart on
-    the same code finds it already there; other code needs a reboot."""
+def extend_code_pcr(janus_digest: bytes, app_digest: bytes) -> None:
+    """Record the Janus and application measurements as the two PCR 15 events
+    of this boot, in that order.  A restart on the same code finds them
+    already there; other code needs a reboot."""
     with tempfile.TemporaryDirectory() as td:
         out = os.path.join(td, "pcr.bin")
         open(out, "wb").close()
         _run(["sudo", "tpm2_pcrread", CODE_PCR_SELECTION, "-o", out])
         with open(out, "rb") as f:
             current = f.read()
-    if current == _extend(_ZERO_PCR, digest):
+    if current == code_pcr_value(janus_digest, app_digest):
         return
     if current != _ZERO_PCR:
         raise RuntimeError(f"PCR {CODE_PCR} already records other code; "
                            "reboot the CVM to measure this code")
-    _run(["sudo", "tpm2_pcrextend", f"{CODE_PCR}:sha256={digest.hex()}"])
+    for digest in (janus_digest, app_digest):
+        _run(["sudo", "tpm2_pcrextend", f"{CODE_PCR}:sha256={digest.hex()}"])
 
 
 # PAPER: §4.3 Step 3 — SEV-SNP evidence: HCL report + VCEK chain + vTPM quote whose qualifyingData carries the binding.
@@ -444,7 +482,7 @@ def build_snp_evidence_bundle(nonce: Optional[bytes] = None,
                               pubkey_spki_der: Optional[bytes] = None,
                               vcek_chain_cache: Optional[bytes] = None,
                               processor: Optional[str] = None,
-                              code_digest: Optional[bytes] = None) -> bytes:
+                              code_digests: Optional[Tuple[bytes, bytes]] = None) -> bytes:
     """Produce the wire-format evidence bundle.
 
     Wire format:
@@ -452,7 +490,7 @@ def build_snp_evidence_bundle(nonce: Optional[bytes] = None,
         | chain_len:4 | pem_chain (VCEK || ASK || ARK, ~6.5 KB)
         | qmsg_len:4  | tpm_quote_msg (~0.4 KB if nonce given, else 0)
         | qsig_len:4  | tpm_quote_sig
-        [| code_len:4 | code_digest (32 B)]   only with code_digest
+        [| code_len:4 | janus_digest || app_digest (64 B)]   only with code_digests
 
     Args:
         nonce: per-connection bytes; SHA256(nonce ‖ pubkey_spki_der) becomes the
@@ -466,11 +504,11 @@ def build_snp_evidence_bundle(nonce: Optional[bytes] = None,
             on every call.  Per-VM stable, so caching across the lifetime
             of the CVM is safe.
         processor: "milan" (default), "genoa", "bergamo", "siena", "turin"
-        code_digest: the code_measurement() already extended into PCR 15 by
-            extend_code_pcr(); the quote then covers PCR 15 only and the
-            digest is appended as a fifth field.  Needs a nonce.
+        code_digests: the (Janus, application) measurements already extended
+            into PCR 15 by extend_code_pcr(); the quote then covers PCR 15
+            only and both digests are appended as a fifth field.  Needs a nonce.
     """
-    if code_digest is not None and not nonce:
+    if code_digests is not None and not nonce:
         raise ValueError("a code measurement needs a nonce-bound quote")
     hcl = read_hcl_report()
 
@@ -487,7 +525,7 @@ def build_snp_evidence_bundle(nonce: Optional[bytes] = None,
                 f.write(snp_payload)
             chain = fetch_vcek_chain(rep_path, processor=processor, out_dir=td)
 
-    if code_digest is not None:
+    if code_digests is not None:
         qmsg, qsig = make_tpm_quote(nonce, pubkey_spki_der, pcrs=CODE_PCR_SELECTION)
     elif nonce:
         qmsg, qsig = make_tpm_quote(nonce, pubkey_spki_der)
@@ -498,8 +536,9 @@ def build_snp_evidence_bundle(nonce: Optional[bytes] = None,
             + struct.pack(">I", len(chain)) + chain
             + struct.pack(">I", len(qmsg))  + qmsg
             + struct.pack(">I", len(qsig))  + qsig)
-    if code_digest is not None:
-        bundle += struct.pack(">I", len(code_digest)) + code_digest
+    if code_digests is not None:
+        code = b"".join(code_digests)
+        bundle += struct.pack(">I", len(code)) + code
     return bundle
 
 
@@ -626,7 +665,10 @@ def verify_snp_bundle(bundle: bytes,
                       maa_url: str = DEFAULT_MAA_URL,
                       logger: Optional[logging.Logger] = None,
                       verify_tpm_quote: bool = True,
-                      require_code_measurement: bool = False
+                      require_code_measurement: bool = False,
+                      expected_janus_measurement: Optional[str] = None,
+                      expected_app_measurement: Optional[str] = None,
+                      expected_cvm_measurement: Optional[str] = None
                       ) -> Tuple[bool, dict]:
     """Verify an SEV-SNP evidence bundle produced by build_snp_evidence_bundle.
 
@@ -643,10 +685,12 @@ def verify_snp_bundle(bundle: bytes,
          claims, and check qualifyingData == SHA256(expected_nonce ‖ expected
          backend TLS public key).
 
-    With ``require_code_measurement`` the measurement is the Backend's code
-    digest, proven by the quote over PCR 15 (a single extend from zero), and
-    expected_measurement is compared with it ("sha256:<hex>" or "<hex>").
-    The launch measurement is then only reported as ``launch_measurement``.
+    With ``require_code_measurement`` (Backend admission) the MAA claims must
+    meet PLATFORM_CLAIMS, and the Backend identity is three values: the CVM
+    hash (the launch measurement), and the Janus and application
+    measurements, proven by the quote over PCR 15 (two extends from zero, in
+    that order).  Each is compared with its ``expected_*`` value when set
+    ("sha256:<hex>" or "<hex>"); ``expected_measurement`` is then unused.
     """
     log = logger or logging.getLogger("snp_attestation")
 
@@ -665,10 +709,23 @@ def verify_snp_bundle(bundle: bytes,
 
     launch = claims.get("x-ms-sevsnpvm-launchmeasurement", "")
     if require_code_measurement:
-        if not ev.tpm_quote_msg or expected_nonce is None or len(ev.code_digest) != 32:
+        failed = platform_claim_failures(claims)
+        if failed:
+            return False, {"error": "the CVM is not a compliant, non-debuggable SEV-SNP VM: "
+                                    + ", ".join(failed), "claims": claims}
+        if not ev.tpm_quote_msg or expected_nonce is None or len(ev.code_digest) != 64:
             return False, {"error": "evidence carries no nonce-bound code measurement",
                            "claims": claims}
-        measured = "sha256:" + ev.code_digest.hex()
+        janus_digest, app_digest = ev.code_digest[:32], ev.code_digest[32:]
+        measured = {"cvm": launch,
+                    "janus": "sha256:" + janus_digest.hex(),
+                    "app": "sha256:" + app_digest.hex()}
+        for kind, wanted, got in (("CVM", expected_cvm_measurement, launch),
+                                  ("JANUS", expected_janus_measurement, janus_digest.hex()),
+                                  ("APP", expected_app_measurement, app_digest.hex())):
+            if wanted and _strip_sha256(wanted) != got.lower():
+                return False, {"error": f"{kind} MEASUREMENT mismatch",
+                               "expected": wanted, "got": got, "claims": claims}
     else:
         measured = launch
         # Policy: measurement match (if requested)
@@ -710,24 +767,33 @@ def verify_snp_bundle(bundle: bytes,
 
     if require_code_measurement:
         try:
-            _verify_code_pcr(ev.tpm_quote_msg, ev.code_digest)
+            _verify_code_pcr(ev.tpm_quote_msg, janus_digest, app_digest)
         except Exception as exc:
             return False, {"error": f"code measurement verification failed: {exc}",
-                           "claims": claims}
-        wanted = (expected_measurement or "").lower()
-        if wanted.startswith("sha256:"):
-            wanted = wanted[len("sha256:"):]
-        if wanted and wanted != ev.code_digest.hex():
-            return False, {"error": "MEASUREMENT mismatch",
-                           "expected": expected_measurement, "got": measured,
                            "claims": claims}
 
     return True, info
 
 
-def _verify_code_pcr(quote_msg: bytes, code_digest: bytes) -> None:
+def platform_claim_failures(claims: dict) -> list:
+    """The PLATFORM_CLAIMS that the MAA claims do not meet, by name."""
+    failed = []
+    for name, wanted in PLATFORM_CLAIMS.items():
+        got = claims.get(name)
+        if type(got) is not type(wanted) or got != wanted:
+            failed.append(f"{name}={got!r}")
+    return failed
+
+
+def _strip_sha256(value: str) -> str:
+    value = value.strip().lower()
+    return value[len("sha256:"):] if value.startswith("sha256:") else value
+
+
+def _verify_code_pcr(quote_msg: bytes, janus_digest: bytes, app_digest: bytes) -> None:
     """The (already AK-verified) quote selects exactly SHA-256 PCR 15 and its
-    pcrDigest is that of PCR 15 after one extend of ``code_digest`` from zero."""
+    pcrDigest is that of PCR 15 after extending ``janus_digest`` then
+    ``app_digest`` from zero."""
     try:
         magic, kind = struct.unpack_from(">IH", quote_msg, 0)
         if magic != 0xFF544347 or kind != TPM_ST_ATTEST_QUOTE:
@@ -755,8 +821,8 @@ def _verify_code_pcr(quote_msg: bytes, code_digest: bytes) -> None:
         raise ValueError("the quote is truncated") from exc
     if selected != {CODE_PCR}:
         raise ValueError(f"the quote does not select exactly SHA-256 PCR {CODE_PCR}")
-    if hashlib.sha256(_extend(_ZERO_PCR, code_digest)).digest() != pcr_digest:
-        raise ValueError(f"PCR {CODE_PCR} does not hold exactly this code measurement")
+    if hashlib.sha256(code_pcr_value(janus_digest, app_digest)).digest() != pcr_digest:
+        raise ValueError(f"PCR {CODE_PCR} does not hold exactly these Janus and application measurements")
 
 
 # PAPER: §4.3 Step 5 — check the quote's qualifyingData == SHA-256(nonce ‖ public key) under the attested AK.
@@ -827,11 +893,13 @@ def _verify_tpm_quote(quote_msg: bytes, quote_sig: bytes,
 
 if __name__ == "__main__":
     # python3 -m janus.common.snp_attestation [--list] [--app PATH] [--image REF]
-    # prints the value for the frontend's EXPECTED_BACKEND_MEASUREMENT.
+    # prints the values for the frontend's EXPECTED_JANUS_MEASUREMENT and
+    # EXPECTED_APP_MEASUREMENT.
     import argparse
     ap = argparse.ArgumentParser(
-        description="Print the Backend code measurement (EXPECTED_BACKEND_MEASUREMENT). "
-                    "Run it on a backend set up like the others, with the same "
+        description="Print the Backend's Janus and application measurements "
+                    "(EXPECTED_JANUS_MEASUREMENT, EXPECTED_APP_MEASUREMENT). Run it on a "
+                    "backend set up from the release and package, with the same "
                     "JANUS_APP_MEASURE / JANUS_APP_IMAGES settings.")
     ap.add_argument("--list", action="store_true", help="list every measured item")
     ap.add_argument("--app", action="append",
@@ -839,8 +907,10 @@ if __name__ == "__main__":
     ap.add_argument("--image", action="append",
                     help="application container image (default: $JANUS_APP_IMAGES)")
     args = ap.parse_args()
-    measured = code_measurement_entries(app_paths=args.app, app_images=args.image)
-    if args.list:
-        for item, digest in measured:
-            print(digest, item)
-    print(f"sha256:{measurement_digest(measured).hex()}  ({summarize_measurement(measured)})")
+    for name, measured in (
+            ("EXPECTED_JANUS_MEASUREMENT", janus_measurement_entries()),
+            ("EXPECTED_APP_MEASUREMENT", app_measurement_entries(args.app, args.image))):
+        if args.list:
+            for item, digest in measured:
+                print(digest, item)
+        print(f"{name}=sha256:{measurement_digest(measured).hex()}  ({summarize_measurement(measured)})")

@@ -100,12 +100,15 @@ RENEW_CHECK_S  = int(os.environ.get("JANUS_RENEW_CHECK_S", "60"))
 ATTESTATION_URL  = "https://sharedweu.weu.attest.azure.net"
 MIN_FRESH_INTERVAL = 60   # seconds – rate limit on /attest/fresh
 
-# Admission policy: when set ("sha256:<hex>" or hex), a registering SNP/TDX
-# backend's code measurement (its vTPM-quoted PCR 15, see
-# snp_attestation.code_measurement) must match it exactly; unset accepts any
-# code measurement the quote proves.  The SNP launch measurement covers only
-# Azure's HCL/paravisor and is not compared.
-EXPECTED_BACKEND_MEASUREMENT = os.environ.get("EXPECTED_BACKEND_MEASUREMENT") or None
+# Admission policy for SNP/TDX backends ("sha256:<hex>" or hex).  The Janus and
+# application measurements are the two events of the vTPM-quoted PCR 15 (see
+# snp_attestation.janus_measurement_entries / app_measurement_entries); the CVM
+# measurement is the SNP launch measurement, which on Azure covers only the
+# HCL/paravisor, so it stays unset there.  Each must match when set; unset
+# accepts any value the quote proves.
+EXPECTED_JANUS_MEASUREMENT = os.environ.get("EXPECTED_JANUS_MEASUREMENT") or None
+EXPECTED_APP_MEASUREMENT   = os.environ.get("EXPECTED_APP_MEASUREMENT") or None
+EXPECTED_CVM_MEASUREMENT   = os.environ.get("EXPECTED_CVM_MEASUREMENT") or None
 
 # Only redirection mode needs an RFC 9345 Delegated Credential (clients
 # connect straight to the backend); proxy mode keeps TLS terminated at the
@@ -704,14 +707,19 @@ class FrontendServer:
                     quote_bytes,
                     expected_nonce=nonce_bytes,
                     expected_pubkey_spki_der=backend_pub_key_der,
-                    expected_measurement=EXPECTED_BACKEND_MEASUREMENT,
                     maa_url=ATTESTATION_URL,
                     logger=self._logger,
                     require_code_measurement=True,
+                    expected_janus_measurement=EXPECTED_JANUS_MEASUREMENT,
+                    expected_app_measurement=EXPECTED_APP_MEASUREMENT,
+                    expected_cvm_measurement=EXPECTED_CVM_MEASUREMENT,
                 )
                 if success:
-                    self._logger.info(f"Backend code measurement {attest_result['measurement']} "
-                                      f"(launch measurement {attest_result['launch_measurement']})")
+                    m = attest_result["measurement"]
+                    self._logger.info(
+                        f"Backend measurements: CVM {m['cvm']} ({'checked' if EXPECTED_CVM_MEASUREMENT else 'not checked'}), "
+                        f"Janus {m['janus']} ({'checked' if EXPECTED_JANUS_MEASUREMENT else 'not checked'}), "
+                        f"application {m['app']} ({'checked' if EXPECTED_APP_MEASUREMENT else 'not checked'})")
             else:
                 verifier = get_attestation_verifier(
                     attestation_url=ATTESTATION_URL,

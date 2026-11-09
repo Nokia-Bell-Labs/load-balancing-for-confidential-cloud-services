@@ -40,37 +40,78 @@ Frontend and backend are Python ∂(Flask); the TLS-terminating `dc_proxy` and t
   encrypts it under the SGX sealing key).
 - `sign_dc()` carries the NSS Bug 2018200 workaround (the `algorithm` field is
   placed after the credential in the signed input) so Firefox/NSS accept the DC.
-- Frontend env knobs: `ISSUE_DC=0` skips DC issuance (proxy-only deployments);
-  `EXPECTED_BACKEND_MEASUREMENT=sha256:<hex>` enforces a backend admission policy
-  on SEV-SNP/TDX backends (off by default: any proven code measurement is
-  admitted). The backend extends its code measurement into vTPM PCR 15 once per
-  boot, and the quote proves the value of PCR 15. The SNP launch measurement
-  covers only Azure's firmware and paravisor; it is logged, not compared.
-  `deploy/frontend_run.sh` passes the variable to the container, and the
-  enclave manifest passes it on to the frontend.
-- The code measurement (`snp_attestation.code_measurement_entries`) covers:
-  every `.py` file of the `janus` package, except the BoringSSL and snpguest
-  checkouts that the setup fetches into it; the `dc_proxy` binary (BoringSSL is
-  linked into it); the files of the Python distributions in
-  `backend/requirements.txt` and of their dependencies; and the application:
-  the files and directories in `JANUS_APP_MEASURE` and the container image IDs
-  in `JANUS_APP_IMAGES` (comma-separated, set on the backend). All backends of
-  a pool need the same code, dependencies and application settings.
-- Python dependencies that are not pinned can resolve to other versions on a
-  backend that is set up later, and then the measurement differs. Set up all
-  backends of a pool from the same package versions.
-- To get the value for the policy, run
-  `python3 -m janus.common.snp_attestation --list` on a backend that is set up
-  like the others, with the same `JANUS_APP_*` settings. The backend also logs
-  the value at startup (`Code measurement sha256:<hex> (PCR 15)`). A changed
-  measurement needs a reboot of the CVM, because PCR 15 records one
-  measurement per boot.
-- Scope: the backend measures itself. The check detects a backend whose code,
-  dependencies or application differ from the approved ones. It does not
-  detect code that reports a false value. A measured boot chain that would
-  close this is future work.
-- A changed policy applies to new registrations. Backends already in the pool
-  stay until the pool is reset (`deploy/README.md`, section 2).
+- Frontend env knob: `ISSUE_DC=0` skips DC issuance (proxy-only deployments).
+
+## Backend admission (SEV-SNP/TDX)
+
+The frontend admits a backend on three separate identities. Each is checked
+against its own source of truth.
+
+1. **CVM.** On Azure the CVM has no expected value. The SNP launch
+   measurement covers only Azure's firmware and paravisor, and it differs
+   between hosts. Neither Azure nor Canonical publishes reference values for
+   the Ubuntu CVM image. The frontend therefore requires the Azure Attestation
+   claims `x-ms-attestation-type=sevsnpvm`,
+   `x-ms-compliance-status=azure-compliant-cvm` and
+   `x-ms-sevsnpvm-is-debuggable=false`. It logs the launch measurement as the
+   CVM hash. `EXPECTED_CVM_MEASUREMENT=<hex>`, when set, must equal the launch
+   measurement. It is for platforms that publish a CVM measurement, and stays
+   unset on Azure.
+2. **Janus, checked against a Janus release.** The Janus measurement
+   (`snp_attestation.janus_measurement_entries`) covers:
+   - every `.py` file of the `janus` package, except the BoringSSL and
+     snpguest checkouts that the setup fetches into it;
+   - the `dc_proxy` binary, with BoringSSL linked into it;
+   - the installed `snpguest` binary;
+   - the setup scripts that run on the backend (`deploy/backend_setup.sh`,
+     `janus/backend/*.sh`);
+   - the files of the Python distributions in `backend/requirements.txt` and
+     of their dependencies.
+
+   The frontend compares it with `EXPECTED_JANUS_MEASUREMENT=sha256:<hex>`.
+3. **Application, checked against the developer's package.** The application
+   measurement (`snp_attestation.app_measurement_entries`) covers the files and
+   directories in `JANUS_APP_MEASURE` and the container image IDs in
+   `JANUS_APP_IMAGES`. Both are comma-separated and set on the backend. The
+   frontend compares it with `EXPECTED_APP_MEASUREMENT=sha256:<hex>`. A
+   backend with no application measures an empty list, which is
+   `sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`.
+
+Each `EXPECTED_*` value is optional. When it's unset, the frontend admits any
+value that the quote proves, and logs it.
+
+The backend extends vTPM PCR 15 with two events per boot, the Janus
+measurement first and then the application measurement. It sends both values,
+and the frontend checks that the quoted PCR 15 equals exactly that sequence of
+two extensions. If the measured code or application changes, reboot the CVM
+before you start the backend again.
+
+To get the expected values, run `python3 -m janus.common.snp_attestation
+--list`, with the same `JANUS_APP_*` settings, on a backend set up from the
+release and package. The backend also logs both values at startup.
+
+`deploy/frontend_run.sh` passes the `EXPECTED_*` variables to the container,
+and the enclave manifest passes them on to the frontend. A changed policy
+applies to new registrations. Backends already in the pool stay until the pool
+is reset (`deploy/README.md`, section 2).
+
+### Limitations
+
+- **The backend measures itself.** The check detects a backend whose code,
+  dependencies or application differ from the approved ones. It relies on the
+  CVM giving no one root access, which an audit of the CVM configuration must
+  establish. Anyone with root can extend any value into PCR 15.
+- **The testbed is insecure.** The artifact-evaluation testbed (`deploy/`)
+  gives the operator SSH and `sudo`. On Azure the frontend can't tell it apart
+  from an audited CVM, so its measurements prove nothing against the operator.
+- **The host supplies the expected values.** They reach the SGX frontend as
+  environment variables, through the existing `loader.insecure__use_host_env`
+  (see `gramine/entrypoint.manifest.template`).
+- **Pinned versions are needed for matching values.** Python dependencies that
+  aren't pinned can resolve to other versions on a backend set up later. The
+  `dc_proxy` and `snpguest` binaries are built on the backend, so the release
+  value holds only where those builds are reproducible. Set up every backend
+  of a pool from the same package versions.
 
 Build/run the whole stack from the repo root README; SGX packaging is in
 `../gramine/` and the CA in `../ca/`.

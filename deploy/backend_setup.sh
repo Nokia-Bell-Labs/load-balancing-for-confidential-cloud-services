@@ -11,8 +11,9 @@
 #   MY_NAME       address or DNS name to register as (required; browsers dial it in redirection mode)
 #   PUBLIC_PORT   registered port (8443); CAP=0 disables the 10 req/s cap
 #   SEALED_DIR    /dev/shm/janus-backend-sealed (RAM-backed; design §4.3)
-#   JANUS_APP_MEASURE / JANUS_APP_IMAGES  application paths / container images to include in the
-#                 code measurement (comma-separated; passed to the backend; see janus/README.md)
+#   JANUS_APP_MEASURE / JANUS_APP_IMAGES  application paths / container images of the application
+#                 measurement (comma-separated; passed to the backend; see janus/README.md). app defaults
+#                 to the hotel and web apps; pool to none. Set them empty to measure no application.
 # Ports (app): hotel :5000 behind :8543 (DC) / :8544 (X.509); web app :5001 behind :8643 / :8644;
 #              HTTPA/2 :5002; RA+TLS :5004; test application :8080 behind :8443 (DC) / :8444 (X.509)
 set -euo pipefail
@@ -29,6 +30,18 @@ command -v snpguest >/dev/null || bash janus/backend/fetch_snp_tools.sh         
 [ -d janus/backend/dc_proxy/boringssl ] || bash janus/backend/dc_proxy/fetch_boringssl.sh   # pinned BoringSSL + boringssl-dc.patch
 [ -x janus/backend/dc_proxy/dc_proxy ] || make -C janus/backend/dc_proxy
 B=./janus/backend/dc_proxy/dc_proxy
+if [ "$ROLE" = app ]; then
+  # the application must be in place before the backend starts: the backend measures it at startup
+  command -v docker >/dev/null || $APT install -y -qq docker.io docker-compose-v2 >/dev/null
+  [ -d apps/microservice_app/DeathStarBench ] || bash apps/microservice_app/fetch.sh     # pinned, unmodified
+  # the checkout's compose file names deathstarbench/hotel-reservation:latest; pin the image the paper's testbed ran (docs/DEPENDENCIES.md)
+  sudo docker image inspect deathstarbench/hotel-reservation:latest >/dev/null 2>&1 || { sudo docker pull -q deathstarbench/hotel-reservation@sha256:488d8980c81eeae337d089185f2dd2643dec589809e102c2abf65a4d6e9bb436 && sudo docker tag deathstarbench/hotel-reservation@sha256:488d8980c81eeae337d089185f2dd2643dec589809e102c2abf65a4d6e9bb436 deathstarbench/hotel-reservation:latest; }
+  # the other images of the services started below
+  HOTEL_IMAGES="deathstarbench/hotel-reservation:latest,hashicorp/consul:latest,jaegertracing/all-in-one:latest,memcached:latest,mongo:5.0"
+  for img in ${HOTEL_IMAGES//,/ }; do sudo docker image inspect "$img" >/dev/null 2>&1 || sudo docker pull -q "$img" >/dev/null; done
+  export JANUS_APP_MEASURE="${JANUS_APP_MEASURE-apps/microservice_app/DeathStarBench/hotelReservation,apps/browser_app}"
+  export JANUS_APP_IMAGES="${JANUS_APP_IMAGES-$HOTEL_IMAGES}"
+fi
 pkill -f "janus.backend.backend_server" 2>/dev/null || true; sleep 1
 CAPENV=""; [ "$CAP" = 1 ] && CAPENV="CTLS_SERVICE_MS=100 CTLS_MAX_INFLIGHT=1"
 env $CAPENV JANUS_BACKEND_SEALED_DIR="$SEALED_DIR" setsid nohup python3 -m janus.backend.backend_server \
@@ -47,10 +60,6 @@ if [ "$ROLE" = app ]; then
   [ -f be.crt ] || { openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout be.key -out be.csr -subj "/CN=$MY_NAME" 2>/dev/null
     printf "subjectAltName=DNS:%s\nbasicConstraints=CA:FALSE\n" "$MY_NAME" > ext.cnf; openssl x509 -req -in be.csr -CA ca.crt -CAkey ca.key -CAcreateserial -days 825 -extfile ext.cnf -out be.crt 2>/dev/null; }
   cd "$ROOT"
-  command -v docker >/dev/null || $APT install -y -qq docker.io docker-compose-v2 >/dev/null
-  [ -d apps/microservice_app/DeathStarBench ] || bash apps/microservice_app/fetch.sh     # pinned, unmodified
-  # the checkout's compose file names deathstarbench/hotel-reservation:latest; pin the image the paper's testbed ran (docs/DEPENDENCIES.md)
-  sudo docker image inspect deathstarbench/hotel-reservation:latest >/dev/null 2>&1 || { sudo docker pull -q deathstarbench/hotel-reservation@sha256:488d8980c81eeae337d089185f2dd2643dec589809e102c2abf65a4d6e9bb436 && sudo docker tag deathstarbench/hotel-reservation@sha256:488d8980c81eeae337d089185f2dd2643dec589809e102c2abf65a4d6e9bb436 deathstarbench/hotel-reservation:latest; }
   # The pinned compose file also defines review and attractions, whose images must be built locally (--no-build cannot
   # create them). /reservation, the request the benchmarks measure, does not use them: start every other service.
   if ! sudo docker ps --format '{{.Names}}' | grep -q hotelreservation-frontend; then

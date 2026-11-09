@@ -15,7 +15,7 @@ loader.env.APP_HOME = "{{ app_home }}"
 # Backend needs runtime env vars (frontend URL, CVM type, port, IP). Frontend
 # needs deployment config it reads from the environment: JANUS_EXTRA_SANS (cert
 # SANs for the service/backend hostnames browsers dial), ISSUE_DC, and
-# EXPECTED_BACKEND_MEASUREMENT. NOTE: this lets the host inject env into the
+# EXPECTED_{JANUS,APP,CVM}_MEASUREMENT. NOTE: this lets the host inject env into the
 # enclave; a production build should instead pin these via a per-var passthrough
 # allowlist or bake them into the measured config.
 loader.insecure__use_host_env = true

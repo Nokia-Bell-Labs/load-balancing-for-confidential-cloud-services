@@ -411,11 +411,12 @@ def test_code_measurement():
         app = Path(td) / "apps" / "web"
         app.mkdir(parents=True)
         (app / "app.py").write_text("print('one')\n")
+        snpguest = Path(td) / "snpguest-bin"
 
-        def m(**kw):
-            kw.setdefault("app_paths", [])
-            kw.setdefault("app_images", [])
-            return sa.code_measurement(str(pkg), **kw)
+        def m(app_paths=None):
+            if app_paths is not None:
+                return sa.measurement_digest(sa.app_measurement_entries(app_paths, [], td))
+            return sa.measurement_digest(sa.janus_measurement_entries(str(pkg), str(snpguest)))
 
         base = m()
         assert base == m(), "the measurement is deterministic"
@@ -436,9 +437,21 @@ def test_code_measurement():
         binary.write_bytes(b"\x7fELF-two")
         assert m() != with_bin
         binary.write_bytes(b"\x7fELF-one")
-        # the configured application is measured, file by file
+        # so are the snpguest binary and the backend setup scripts
+        snpguest.write_bytes(b"\x7fELF-snp")
+        with_snp = m()
+        assert with_snp != with_bin
+        (Path(td) / "deploy").mkdir()
+        (Path(td) / "deploy" / "backend_setup.sh").write_text("echo one\n")
+        with_script = m()
+        assert with_script != with_snp
+        (Path(td) / "deploy" / "backend_setup.sh").write_text("echo two\n")
+        assert m() != with_script
+        # the application is a separate measurement, file by file
+        assert m(app_paths=[]) == bytes.fromhex(
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"), "no application"
         with_app = m(app_paths=["apps/web"])
-        assert with_app != with_bin
+        assert with_app != m(app_paths=[])
         (app / "app.py").write_text("print('two')\n")
         assert m(app_paths=["apps/web"]) != with_app
         # a configured application path that does not exist is an error
@@ -448,14 +461,105 @@ def test_code_measurement():
         except FileNotFoundError:
             pass
         # the Python distributions of backend/requirements.txt (and their
-        # dependencies) are measured by file
+        # dependencies) are measured by file, as part of Janus
         (pkg / "backend" / "requirements.txt").write_text("cryptography\n")
-        entries = sa.code_measurement_entries(str(pkg), app_paths=[], app_images=[])
+        entries = sa.janus_measurement_entries(str(pkg), str(snpguest))
         dists = {label.split(":")[1] for label, _ in entries if label.startswith("pydist:")}
         assert any(d.startswith("cryptography==") for d in dists), dists
         assert sum(1 for label, _ in entries if label.startswith("pydist:cryptography==")) > 10
         assert sa.measurement_digest(entries) != with_bin
-    print("ok  code measurement: skips fetched checkouts; covers Janus files, dc_proxy, Python deps, application")
+    print("ok  code measurement: skips fetched checkouts; Janus covers its files, dc_proxy, snpguest, "
+          "setup scripts, Python deps; the application is measured separately")
+
+
+def _quote_msg(pcr_value: bytes, pcrs=(15,)) -> bytes:
+    """A TPMS_ATTEST quote over SHA-256 ``pcrs`` whose pcrDigest is that of ``pcr_value``."""
+    import hashlib
+    import struct
+    bitmap = bytearray(3)
+    for i in pcrs:
+        bitmap[i // 8] |= 1 << (i % 8)
+    return (struct.pack(">IH", 0xFF544347, 0x8018) + struct.pack(">H", 0)
+            + struct.pack(">H", 32) + bytes(32) + bytes(17) + bytes(8)
+            + struct.pack(">IHB", 1, 0x000B, 3) + bytes(bitmap)
+            + struct.pack(">H", 32) + hashlib.sha256(pcr_value).digest())
+
+
+# ── PCR 15 holds the Janus then the application measurement ──────────────────
+def test_code_pcr():
+    from janus.common import snp_attestation as sa
+    j, a = b"\x01" * 32, b"\x02" * 32
+    good = _quote_msg(sa.code_pcr_value(j, a))
+    sa._verify_code_pcr(good, j, a)
+    for name, quote, args in (("wrong Janus", good, (b"\x03" * 32, a)),
+                              ("wrong application", good, (j, b"\x03" * 32)),
+                              ("swapped order", good, (a, j)),
+                              ("one event only", _quote_msg(sa._extend(bytes(32), j)), (j, a)),
+                              ("other PCRs", _quote_msg(sa.code_pcr_value(j, a), (14, 15)), (j, a))):
+        try:
+            sa._verify_code_pcr(quote, *args)
+            assert False, f"{name} must be rejected"
+        except ValueError:
+            pass
+    print("ok  PCR 15: exactly Janus then application; rejects wrong, swapped, missing, extra")
+
+
+# ── admission: CVM claims, then each expected measurement when set ───────────
+def test_backend_admission_measurements():
+    import base64
+    import json
+    import struct
+    from janus.common import snp_attestation as sa
+    j, a = b"\x01" * 32, b"\x02" * 32
+    claims_ok = {"x-ms-attestation-type": "sevsnpvm",
+                 "x-ms-compliance-status": "azure-compliant-cvm",
+                 "x-ms-sevsnpvm-is-debuggable": False,
+                 "x-ms-sevsnpvm-launchmeasurement": "ab" * 48}
+    runtime = b"{}"
+    hcl = bytes(32 + 1184) + struct.pack("<IIIII", 0, 0, 0, 0, len(runtime)) + runtime
+
+    def bundle(code=j + a):
+        parts = [hcl, b"chain", _quote_msg(sa.code_pcr_value(j, a)), b"sig", code]
+        return b"".join(struct.pack(">I", len(p)) + p for p in parts)
+
+    saved = sa.submit_to_maa, sa._verify_tpm_quote
+    sa._verify_tpm_quote = lambda *x, **k: None     # the AK signature and nonce binding have their own tests
+    try:
+        def admit(claims=claims_ok, b=None, **expected):
+            payload = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=")
+            sa.submit_to_maa = lambda *x, **k: f"h.{payload}.s"
+            ok, info = sa.verify_snp_bundle(b or bundle(), expected_nonce=b"n",
+                                            require_code_measurement=True, **expected)
+            return ok, info
+
+        ok, info = admit()
+        assert ok, info
+        assert info["measurement"] == {"cvm": "ab" * 48, "janus": "sha256:" + j.hex(),
+                                       "app": "sha256:" + a.hex()}
+        ok, _ = admit(expected_janus_measurement="sha256:" + j.hex(),
+                      expected_app_measurement=a.hex(), expected_cvm_measurement="AB" * 48)
+        assert ok, "matching expected values admit"
+        for expected in ({"expected_janus_measurement": "sha256:" + a.hex()},
+                         {"expected_app_measurement": "sha256:" + j.hex()},
+                         {"expected_cvm_measurement": "cd" * 48}):
+            ok, info = admit(**expected)
+            assert not ok and "MEASUREMENT mismatch" in info["error"], (expected, info)
+        for name, value in (("x-ms-sevsnpvm-is-debuggable", True),
+                            ("x-ms-sevsnpvm-is-debuggable", "false"),
+                            ("x-ms-compliance-status", None),
+                            ("x-ms-attestation-type", "tdxvm")):
+            claims = dict(claims_ok)
+            if value is None:
+                del claims[name]
+            else:
+                claims[name] = value
+            ok, info = admit(claims)
+            assert not ok and "not a compliant" in info["error"], (name, value, info)
+        ok, info = admit(b=bundle(code=j))
+        assert not ok and "no nonce-bound code measurement" in info["error"], info
+    finally:
+        sa.submit_to_maa, sa._verify_tpm_quote = saved
+    print("ok  admission: requires the CVM claims; compares CVM, Janus and application values when set")
 
 
 if __name__ == "__main__":
@@ -468,4 +572,6 @@ if __name__ == "__main__":
     test_frontend_restart_skips_issuance()
     test_frontend_resign_and_push()
     test_code_measurement()
+    test_code_pcr()
+    test_backend_admission_measurements()
     print("ALL OK")

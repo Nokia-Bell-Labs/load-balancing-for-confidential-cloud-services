@@ -361,10 +361,10 @@ class BackendServer:
           /attest/SevSnpVm and verifies the returned JWT.
         """
         if self._cvm_type in ("snp", "tdx"):
-            from janus.common.snp_attestation import (build_snp_evidence_bundle,
-                                                code_measurement_entries, extend_code_pcr,
-                                                measurement_digest, parse_snp_evidence_bundle,
-                                                summarize_measurement)
+            from janus.common.snp_attestation import (app_measurement_entries,
+                                                build_snp_evidence_bundle, extend_code_pcr,
+                                                janus_measurement_entries, measurement_digest,
+                                                parse_snp_evidence_bundle, summarize_measurement)
             nonce_bytes = self._nonce.encode("utf-8") if self._nonce else None
             # Bind the quote to this backend's TLS public key (SPKI DER), not
             # just the nonce (paper §4.3 Steps 3 and 5). The frontend recomputes the
@@ -374,16 +374,18 @@ class BackendServer:
                 serialization.PublicFormat.SubjectPublicKeyInfo,
             )
             try:
-                measured = code_measurement_entries()
-                code_digest = measurement_digest(measured)
-                extend_code_pcr(code_digest)
-                self._logger.info(f"Code measurement sha256:{code_digest.hex()} (PCR 15)")
-                self._logger.info(f"Code measurement covers {summarize_measurement(measured)}")
+                digests = []
+                for name, measured in (("Janus", janus_measurement_entries()),
+                                       ("Application", app_measurement_entries())):
+                    digests.append(measurement_digest(measured))
+                    self._logger.info(f"{name} measurement sha256:{digests[-1].hex()} (PCR 15) "
+                                      f"covers {summarize_measurement(measured)}")
+                extend_code_pcr(*digests)
                 bundle = build_snp_evidence_bundle(
                     nonce=nonce_bytes,
                     pubkey_spki_der=pubkey_der,
                     vcek_chain_cache=self._vcek_chain_cache,
-                    code_digest=code_digest,
+                    code_digests=tuple(digests),
                 )
                 if self._vcek_chain_cache is None:
                     self._vcek_chain_cache = parse_snp_evidence_bundle(bundle).pem_chain

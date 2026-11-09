@@ -41,6 +41,15 @@ backend a short-lived Delegated Credential (RFC 9345). With this credential,
 the backend serves clients under the identity of the frontend. Unmodified TLS
 clients and browsers work with Janus, in proxy mode and in redirection mode.
 
+To admit a backend, the frontend checks three identities. Azure Attestation
+must report a compliant, non-debuggable SEV-SNP CVM. The frontend records the
+CVM hash, but Azure publishes no expected value for it. The Janus code and the
+application are measured into the vTPM of the backend, and the frontend can
+compare each one with an expected value. The backend measures itself, so
+these checks hold only on a CVM where no one has root access. The testbed in
+`deploy/` gives the operator SSH and `sudo`, so it is not secure in this sense.
+`janus/README.md` lists what each measurement covers and the limitations.
+
 ### What is in the repository
 
 | Directory | Contents |
