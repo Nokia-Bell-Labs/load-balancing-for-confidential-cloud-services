@@ -42,21 +42,21 @@ Frontend and backend are Python ∂(Flask); the TLS-terminating `dc_proxy` and t
   placed after the credential in the signed input) so Firefox/NSS accept the DC.
 - Frontend env knob: `ISSUE_DC=0` skips DC issuance (proxy-only deployments).
 
-## Backend admission (SEV-SNP/TDX)
+## Backend admission (SEV-SNP)
 
-The frontend admits a backend on three separate identities. Each is checked
-against its own source of truth.
+The frontend admits a SEV-SNP backend on three separate identities. A TDX
+backend is not admitted. Each identity is checked against its own source of
+truth.
 
 1. **CVM.** On Azure the CVM has no expected value. The SNP launch
-   measurement covers only Azure's firmware and paravisor, and it differs
-   between hosts. Neither Azure nor Canonical publishes reference values for
-   the Ubuntu CVM image. The frontend therefore requires the Azure Attestation
-   claims `x-ms-attestation-type=sevsnpvm`,
+   measurement covers only Azure's firmware and paravisor, and it changes
+   when Azure updates that firmware. We found no published reference value
+   for the Ubuntu CVM image. The frontend therefore requires the Azure
+   Attestation claims `x-ms-attestation-type=sevsnpvm`,
    `x-ms-compliance-status=azure-compliant-cvm` and
-   `x-ms-sevsnpvm-is-debuggable=false`. It logs the launch measurement as the
-   CVM hash. `EXPECTED_CVM_MEASUREMENT=<hex>`, when set, must equal the launch
-   measurement. It is for platforms that publish a CVM measurement, and stays
-   unset on Azure.
+   `x-ms-sevsnpvm-is-debuggable=false`. It logs the launch measurement.
+   `EXPECTED_CVM_MEASUREMENT=<hex>`, when set, must equal it. It is for
+   platforms that publish one, and stays unset on Azure.
 2. **Janus, checked against a Janus release.** The Janus measurement
    (`snp_attestation.janus_measurement_entries`) covers:
    - every `.py` file of the `janus` package, except the BoringSSL and
@@ -67,6 +67,10 @@ against its own source of truth.
      `janus/backend/*.sh`);
    - the files of the Python distributions in `backend/requirements.txt` and
      of their dependencies.
+
+   It does not cover the Python interpreter, the kernel, the OS packages the
+   backend runs (`tpm2-tools`, `openssl`, Docker), or the `dc_proxy` sources.
+   The CVM audit covers those. The built `dc_proxy` binary is measured.
 
    The frontend compares it with `EXPECTED_JANUS_MEASUREMENT=sha256:<hex>`.
 3. **Application, checked against the developer's package.** The application
@@ -86,9 +90,12 @@ and the frontend checks that the quoted PCR 15 equals exactly that sequence of
 two extensions. If the measured code or application changes, reboot the CVM
 before you start the backend again.
 
-To get the expected values, run `python3 -m janus.common.snp_attestation
---list`, with the same `JANUS_APP_*` settings, on a backend set up from the
-release and package. The backend also logs both values at startup.
+The backend logs both values at startup (`Janus measurement sha256:<hex>` and
+`Application measurement sha256:<hex>`). Copy them from that log:
+`grep measurement /tmp/janus-backend.log` after `deploy/backend_setup.sh`.
+`python3 -m janus.common.snp_attestation --list` prints the same values only
+when `JANUS_APP_MEASURE` and `JANUS_APP_IMAGES` are set to what that backend
+measured. A plain shell has neither set, so it reports the empty application.
 
 `deploy/frontend_run.sh` passes the `EXPECTED_*` variables to the container,
 and the enclave manifest passes them on to the frontend. A changed policy
@@ -110,10 +117,13 @@ is reset (`deploy/README.md`, section 2).
 - **Pinned versions are needed for matching values.** Python dependencies that
   aren't pinned can resolve to other versions on a backend set up later. The
   `dc_proxy` and `snpguest` binaries are built on the backend, so the release
-  value holds only where those builds are reproducible. Both were identical
-  across two Azure CVMs, once `fetch_snp_tools.sh` pinned the build date of
-  `snpguest` with `SOURCE_DATE_EPOCH`. A newer compiler can still change them.
-  Set up every backend of a pool from the same package versions.
+  value holds only where those builds are reproducible. `fetch_snp_tools.sh`
+  sets `SOURCE_DATE_EPOCH` from the `snpguest` tag, because the vendored
+  OpenSSL embeds its build date. A different compiler version can still change
+  the binaries. Of the container images the `app` role measures, only
+  `deathstarbench/hotel-reservation` is pinned by digest. The others are
+  pulled by tag, so a later setup can record a different application
+  measurement. Set up every backend of a pool from the same package versions.
 
 Build/run the whole stack from the repo root README; SGX packaging is in
 `../gramine/` and the CA in `../ca/`.

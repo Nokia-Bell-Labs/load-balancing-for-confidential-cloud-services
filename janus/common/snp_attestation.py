@@ -103,7 +103,7 @@ RUNTIME_HDR_LEN = 20       # DataSize|Version|ReportType|HashType|ClaimSize
 # Backend code measurement: once per boot the Backend extends SHA-256 PCR 15
 # with the Janus measurement, then the application measurement, and quotes
 # only that PCR at registration.  The SNP launch measurement covers Azure's
-# HCL/paravisor, not the guest: it is the CVM hash, compared only with an
+# HCL/paravisor, not the guest: it is the CVM's launch measurement, compared only with an
 # explicit expected value.
 CODE_PCR = 15
 CODE_PCR_SELECTION = f"sha256:{CODE_PCR}"
@@ -686,8 +686,8 @@ def verify_snp_bundle(bundle: bytes,
          backend TLS public key).
 
     With ``require_code_measurement`` (Backend admission) the MAA claims must
-    meet PLATFORM_CLAIMS, and the Backend identity is three values: the CVM
-    hash (the launch measurement), and the Janus and application
+    meet PLATFORM_CLAIMS, and the Backend identity is three values: the CVM's
+    launch measurement, and the Janus and application
     measurements, proven by the quote over PCR 15 (two extends from zero, in
     that order).  Each is compared with its ``expected_*`` value when set
     ("sha256:<hex>" or "<hex>"); ``expected_measurement`` is then unused.

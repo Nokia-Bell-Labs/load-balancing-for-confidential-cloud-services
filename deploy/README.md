@@ -90,10 +90,16 @@ quote proves. To admit only approved code, start the frontend with
 `EXPECTED_APP_MEASUREMENT=sha256:<hex>` (`frontend_run.sh` passes them to the
 enclave). Leave `EXPECTED_CVM_MEASUREMENT` unset on Azure.
 
-To get the two values, run `python3 -m janus.common.snp_attestation` on a
-backend set up from the release and the application. A backend also logs them
-at startup (`Janus measurement sha256:<hex>` and `Application measurement
-sha256:<hex>`).
+A backend logs both values at startup (`Janus measurement sha256:<hex>` and
+`Application measurement sha256:<hex>`). Copy them from that log:
+
+```sh
+grep measurement /tmp/janus-backend.log
+```
+
+`python3 -m janus.common.snp_attestation` prints the same values only when
+`JANUS_APP_MEASURE` and `JANUS_APP_IMAGES` are set to what that backend
+measured. A plain shell has neither set, so it reports the empty application.
 
 - **Janus measurement.** It covers the Janus code, `dc_proxy`, `snpguest`, the
   backend setup scripts and the Python dependencies.

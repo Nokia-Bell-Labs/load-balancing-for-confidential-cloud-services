@@ -100,12 +100,12 @@ RENEW_CHECK_S  = int(os.environ.get("JANUS_RENEW_CHECK_S", "60"))
 ATTESTATION_URL  = "https://sharedweu.weu.attest.azure.net"
 MIN_FRESH_INTERVAL = 60   # seconds – rate limit on /attest/fresh
 
-# Admission policy for SNP/TDX backends ("sha256:<hex>" or hex).  The Janus and
-# application measurements are the two events of the vTPM-quoted PCR 15 (see
-# snp_attestation.janus_measurement_entries / app_measurement_entries); the CVM
-# measurement is the SNP launch measurement, which on Azure covers only the
-# HCL/paravisor, so it stays unset there.  Each must match when set; unset
-# accepts any value the quote proves.
+# Admission policy for SEV-SNP backends ("sha256:<hex>" or hex).  A TDX backend
+# is not admitted.  The Janus and application measurements are the two events
+# of the vTPM-quoted PCR 15 (see snp_attestation.janus_measurement_entries /
+# app_measurement_entries); the CVM measurement is the SNP launch measurement,
+# which on Azure covers only the HCL/paravisor, so it stays unset there.  Each
+# must match when set; unset accepts any value the quote proves.
 EXPECTED_JANUS_MEASUREMENT = os.environ.get("EXPECTED_JANUS_MEASUREMENT") or None
 EXPECTED_APP_MEASUREMENT   = os.environ.get("EXPECTED_APP_MEASUREMENT") or None
 EXPECTED_CVM_MEASUREMENT   = os.environ.get("EXPECTED_CVM_MEASUREMENT") or None
