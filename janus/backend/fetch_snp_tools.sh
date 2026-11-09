@@ -46,7 +46,8 @@ fi
 git -C "$DEST" checkout -q "$TAG"
 
 echo "[snp-tools] building snpguest $TAG (cargo, release)"
-( cd "$DEST" && cargo build --release )
+# the vendored OpenSSL embeds its build date; pin it so every backend builds the binary the Janus measurement expects
+( cd "$DEST" && SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)" cargo build --release )
 sudo install -m 0755 "$DEST/target/release/snpguest" "$PREFIX/snpguest"
 
 echo "[snp-tools] done -> $PREFIX/snpguest ($("$PREFIX/snpguest" --version 2>/dev/null || echo installed)); tpm2-tools via apt"

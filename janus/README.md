@@ -110,8 +110,10 @@ is reset (`deploy/README.md`, section 2).
 - **Pinned versions are needed for matching values.** Python dependencies that
   aren't pinned can resolve to other versions on a backend set up later. The
   `dc_proxy` and `snpguest` binaries are built on the backend, so the release
-  value holds only where those builds are reproducible. Set up every backend
-  of a pool from the same package versions.
+  value holds only where those builds are reproducible. Both were identical
+  across two Azure CVMs, once `fetch_snp_tools.sh` pinned the build date of
+  `snpguest` with `SOURCE_DATE_EPOCH`. A newer compiler can still change them.
+  Set up every backend of a pool from the same package versions.
 
 Build/run the whole stack from the repo root README; SGX packaging is in
 `../gramine/` and the CA in `../ca/`.
