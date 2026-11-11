@@ -31,8 +31,7 @@ The artifact contains:
 - the full system,
 - the two attested-TLS baselines that the paper compares against,
 - the three application workloads,
-- the measurement scripts,
-- the raw data behind every number, and
+- the measurement scripts, and
 - the scripts that regenerate every figure and table.
 
 The final version of the paper also compares Janus with Oak and OHTTP+KMS.
@@ -42,9 +41,10 @@ cover these two baselines. The scripts in `eval/ae/` do not run them.
 
 ## Badges sought
 
-- **Available**: this public repository, at tag `atc26-ae` (commit
-  `d24c762`), under the BSD 3-Clause Clear License (Nokia Bell Labs). We will
-  deposit the same version on Zenodo with a DOI.
+- **Available**: this public repository, under the BSD 3-Clause Clear License
+  (Nokia Bell Labs). The artifact evaluation used tag `atc26-ae` (commit
+  `d24c762`). The Zenodo deposit, with a DOI, holds the final version of
+  `main`.
 - **Functional**: the system builds and runs end to end on the provided
   testbed.
 - **Results Reproduced**: every client-driven experiment re-runs on the testbed

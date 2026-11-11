@@ -254,9 +254,9 @@ steps are the same.
 eval/ae/ae-remote.sh janus-client data
 ```
 
-**Expected duration**: about **1 hour** for the default set (Tables 1 to 3 and
-Fig. 5). Fig. 6 (about 1 hour) and the application workloads (3 to 5 minutes
-each) are separate runs. They need a pool profile, see below.
+**Expected duration**: about **3 hours**. The command runs every experiment
+except the LLM run: Tables 1 to 3 and Fig. 5 (about 1 hour), Fig. 6 (about
+1.5 hours) and the application workloads (3 to 5 minutes each).
 
 The run starts detached on the client, so it continues if your connection
 drops or if you press `Ctrl-C`. `eval/ae/ae-remote.sh janus-client attach`
@@ -272,8 +272,8 @@ driver resumes the run and skips the experiments that succeeded. A failed
 experiment fails the command. The driver never replaces a failed experiment
 with the data of the paper.
 
-**What it does**, in this order. These three experiments need nothing from us.
-These three run on the `default` profile:
+**What it does**, in this order. The first three experiments run on the
+`default` profile and need nothing from us:
 
 | Experiment | Reproduces | Time |
 | --- | --- | --- |
@@ -304,8 +304,10 @@ Each script checks the profile before it measures. If the profile is not in
 place, the script stops with a clear message.
 
 `-e` selects a subset. Example: `eval/ae/ae-remote.sh janus-client data -e
-table1,table3` (2 minutes). `-e default` is the default set above. `COLD=1`
-adds the cold-cache pass of Table 2. The paper does not report the cold pass.
+table1,table3` (2 minutes). `-e tables` runs the three experiments on the
+`default` profile. `-e default` runs every experiment except the LLM run, as
+`data` without `-e` does. `COLD=1` adds the cold-cache pass of Table 2. The
+paper does not report the cold pass.
 
 **Output**: the raw per-request CSV files are on the client under
 `~/Janus/eval/data/ae-*/`. The benchmark outputs are under
