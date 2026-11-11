@@ -39,41 +39,24 @@ data/<run_id>/           raw per-attempt CSVs, env snapshot, JWKS cache
 * **Latency** (`--mode latency`, the default). The runner does sequential per-attempt timing. It discards ``n_warmup`` attempts, then records ``n_measure`` attempts. It writes one row per attempt. Use this mode for the connection-establishment latency figures.
 * **Scale** (`--mode scale`). An open-loop driver sends Poisson arrivals at each rate in ``runs.yaml::scale.rates_rps``. It records per-attempt rows with ``wait_ms`` (the client-side queue time). It also writes a per-step CSV that summarises the achieved throughput and the tail response time at each offered rate. Use this mode for the scalability figures. Response time = ``wait_ms + total_e2e_ms``. Thus closed-loop coordination effects do not hide saturation.
 
-## One-shot reproduction
+## Running the measurements
 
-1. Start the five services (vanilla TLS, Janus frontend, Janus backend, RA+TLS server, HTTPA2 server). Fill in `configs/env.yaml`. The repo root README says how to start these services. Read its **Azure testbed** section (host SKUs, MAA) and its **Reproduce the evaluation** section (ordered bring-up).
-2. Latency figures: run `make eval`. It does warm and cold cache passes for all protocols.
-3. Scalability figures: run `make eval-scale`. It does a Poisson rate run per `runs.yaml::scale` for all protocols. Set `CACHE=cold` for the cold-cache scalability slice.
-4. Run `make aggregate`. It writes `data/<RUN_ID>/summary.csv` (latency) and `data/<RUN_ID>/scale_summary.csv` (scalability steps).
-5. Run `eval/ae/ae.py -m figures` to make the figures of the paper from the run. See `plotting/README.md`.
+Run the measurements with the scripts in `eval/ae/`, not with `make` by hand.
+`eval/ae/ae.py -m data` runs the experiments of the paper, and
+`eval/ae/ae.py -m figures` draws the figures and tables from that run (see
+the main README). Each `eval/ae/run_*.sh` script runs one experiment with the
+RTT, the rates and the client settings of the paper. `ae.py -m data` calls
+these scripts and records the run, so use `ae.py` when you want the figures.
+`deploy/README.md` says how to build the testbed.
 
-Tag a specific run:
+## RTT and application benchmarks
 
-    make eval RUN_ID=2026-05-28-paper-rev1
-
-## RTT series and backend-scaling runs
-
-`make eval` and `make eval-scale` measure at the testbed's native RTT, which is below 1 ms. Two figures vary the topology. This section says how to produce them.
-
-**Latency vs RTT** (`fig_e2e_latency`, `fig_latency_breakdown`). On the client VM, inject RTT toward the servers with `tc-netem`. Tag one run per RTT:
-
-```sh
-IFACE=eth0   # interface toward the frontend/backends
-for rtt in 0 20 40 80 120 160; do
-  sudo tc qdisc del dev "$IFACE" root 2>/dev/null || true
-  [ "$rtt" -gt 0 ] && sudo tc qdisc add dev "$IFACE" root netem delay "${rtt}ms"
-  make eval RUN_ID=rtt-$rtt          # one-sided egress delay ≈ +rtt ms RTT
-done
-sudo tc qdisc del dev "$IFACE" root 2>/dev/null || true
-```
-
-**Backend scaling** (`fig_scalability_backends`). Register N backends. The pool is set per window. Then do one scale run per N with `eval/ae/run_fig6.sh <N>`. This script sets the paper's offered-rate grid and `JANUS_AMORTIZE_CONTROL=1`. With that variable, the client validates the frontend once and fans out across its `/route` pool. By hand:
-
-```sh
-make eval-scale RUN_ID=mb-N$N PROTOCOLS='ctls_redirect'
-```
-
-The application benchmarks (`apps/microservice_bench.py`, `apps/llm_ttft_bench.py`, `apps/browser_plt_bench.py`) run at native RTT against the same services. The LLM workload also needs the model and the dataset staged onto the H100 CVM (`staging/`).
+`run_table2_fig5.sh` adds a one-sided `tc-netem` egress delay on the client for
+each RTT and removes it when it exits. `run_fig6.sh <N>` measures one pool
+size N. The application benchmarks (`benches/microservice_bench.py`,
+`benches/llm_ttft_bench.py`, `benches/browser_plt_bench.py`) run at 40 ms RTT
+through `run_fig7c.sh`, `run_fig7b.sh` and `run_fig7a.sh`. The LLM workload
+also needs the model and the dataset staged onto the H100 CVM (`staging/`).
 
 ## Reproducibility guarantees
 
