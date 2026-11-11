@@ -203,6 +203,10 @@ cd janus-artifact
 git checkout d24c762
 ```
 
+This version reproduces the numbers of the paper on the testbed that we
+provide. To build your own testbed, use `main` on every machine instead. It
+has the current setup scripts and backend admission checks.
+
 If the clone does not work, copy the same version from the client VM:
 
 ```sh
