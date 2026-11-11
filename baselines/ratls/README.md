@@ -4,115 +4,57 @@
   SPDX-License-Identifier: BSD-3-Clause-Clear
 -->
 
-# RA-TLS Implementation
+# RA+TLS baseline
 
-> **In this artifact** the RA+TLS baseline server runs on a SEV-SNP CVM (`ratls_http_server.py --type snp`,
-> started by `deploy/backend_setup.sh app`), and the client is the RA+TLS interpreter on the client VM.
-> The SGX/Gramine packaging described below is the upstream prototype's original mode; the paper's
-> numbers do not use it.
-
-
-Remote Attestation TLS with per-connection attestation via TLS protocol extensions. Fresh SGX quote generated for each TLS handshake.
-
-## Architecture
+RA+TLS attests on every TLS connection. In this artifact the server runs on a
+SEV-SNP CVM, and the client runs on the client VM.
 
 ```
-Every TLS Connection:
-  1. TLS handshake begins
-  2. Server generates fresh SGX quote
-  3. Quote bound to binder_secret
-  4. Quote sent via TLS extension 421
-  5. Client verifies during handshake
+Every TLS connection:
+  1. The client asks for attestation in TLS extension 420.
+  2. The server builds fresh SEV-SNP evidence bound to the handshake binder secret.
+  3. The server sends the evidence in TLS extension 421.
+  4. The client verifies the evidence.
 ```
 
-## Components
+## Contents
 
-- **[server/](server/)** - RA-TLS server with TLS extension support
-- **[client.py](client.py)** - RA-TLS client with verification (requires RATLS Python)
-- **[gramine/](gramine/)** - Gramine-SGX containerization
-- **[openssl/](../ratls-external/)** - Custom OpenSSL 1.1.1m (external repo)
-- **[python/](../python-ratls/)** - Custom Python build with RA-TLS OpenSSL
-
-## Prerequisites
-
-Unlike cTLS, RA-TLS requires:
-- Custom OpenSSL 1.1.1m with `SSL_export_handshake_binder_secret()` API
-- Custom Python 3.10 linked to RA-TLS OpenSSL
-- C compiler for Python bridge
+- `server/`: the RA+TLS server and its C bridge to OpenSSL (`server/README.md`).
+- `client.py`: the RA+TLS client.
+- `build_python_with_ratls.sh`: builds the RA+TLS interpreter.
+- `ratls-external-intel-sgx.patch`: our patch to the upstream `ratls`
+  repository (`docs/DEPENDENCIES.md`).
 
 ## Build
 
-```bash
-# 1. Build RA-TLS OpenSSL
-cd ../ratls-external/
-make
+The deploy scripts build everything: `deploy/client_setup.sh` on the client
+VM and `deploy/backend_setup.sh app` on the application backend. To build by
+hand, run from the repository root:
 
-# 2. Build Python with RA-TLS OpenSSL
-cd ..
-./ratls/build_python_with_ratls.sh
-
-# 3. Build Python C bridge
-cd ratls/server/
-../../python-ratls/bin/python3 setup.py build_ext --inplace
+```sh
+sudo apt-get install -y build-essential libtool autoconf automake libssl-dev libffi-dev zlib1g-dev \
+  libbz2-dev libreadline-dev libsqlite3-dev liblzma-dev
+baselines/ratls/build_python_with_ratls.sh
+cd baselines/ratls/server && ../../python-ratls/bin/python3 setup.py build_ext --inplace
 ```
 
-## Quick Start
+The first command installs the build packages that the deploy scripts
+install. The upstream bootstrap needs the autotools among them. The script
+clones the upstream `ratls` at the pinned commit into
+`baselines/ratls-external/` and applies the patch. It builds the patched
+OpenSSL 1.1.1m, libsodium and the TPM2 TSS (`make bootstrap`), and then
+Python 3.10.12 against them into `baselines/python-ratls/`. The last command
+builds the bridge module. The client and the server both need it.
 
-```bash
-# Run RA-TLS server (non-SGX, from server/ directory)
-cd server/
-make run-docker
+## Client
 
-# Test with client (from ratls/ directory)
-# Uses RATLS Python via shebang
-./client.py
+Run the client with the RA+TLS interpreter. The system `python3` lacks the
+OpenSSL extension API.
 
-# Or explicitly with RATLS Python
-../python-ratls/bin/python3 client.py
+```sh
+baselines/python-ratls/bin/python3 baselines/ratls/client.py --server https://<backend>:5004
 ```
 
-## Client Usage
-
-```bash
-# Default: connects to https://localhost:5001
-./client.py
-
-# With custom server
-./client.py --server https://your-server:port
-
-# Skip quote verification (for testing)
-./client.py --no-verify
-
-# With CA certificate for TLS validation
-./client.py --ca-cert /path/to/ca.pem
-```
-
-**Note:** The client requires the RATLS Python build (`python-ratls/bin/python3`) because it uses the custom OpenSSL with TLS extension support.
-
-## SGX Mode
-
-```bash
-cd server/
-make graminize
-make run-sgx
-```
-
-## Performance
-
-- Every connection: ~250ms (quote generation + verification)
-- Quote freshness: Real-time (seconds old)
-- Use case: Maximum freshness, server-to-server communication
-
-## Documentation
-
-See [server/README.md](server/README.md) for implementation details.
-
-## Comparison with cTLS
-
-| Aspect | cTLS | RA-TLS |
-|--------|------|--------|
-| Attestation | Once at startup | Every connection |
-| First connection | ~6.6s | ~250ms |
-| Subsequent | ~10ms | ~250ms |
-| Browser support | ✅ | ❌ |
-| Freshness | 0-90 days | Real-time |
+Options: `--no-verify` skips the evidence check, `--ca-cert <pem>` checks the
+TLS certificate against a CA, `--no-tls-verify` skips the certificate check,
+and `--path` names the request path.
