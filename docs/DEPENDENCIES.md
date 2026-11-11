@@ -33,6 +33,14 @@ These are standard OS packages. The script or Dockerfile in the table installs t
 | `libsgx-dcap-quote-verify-dev`, `libsgx-dcap-ql`, `az-dcap-client` | SGX quote verification (Intel DCAP + Azure DCAP provider) | `gramine/Dockerfile.gramine` |
 | `azguestattestation1` (1.0.5) | optional. Azure `AttestationClient`. The evaluation does not use it | not installed by default |
 
+## Python packages of the Oak and OHTTP+KMS baselines
+
+| Package | Used by | Pinned version | Installed by |
+| --- | --- | --- | --- |
+| `pyhpke` | OHTTP+KMS: HPKE (RFC 9180) in the KMS, the gateways and the client | `0.6.5` | `baselines/ohttp/Dockerfile` (KMS), `baselines/setup_baseline_cvm.sh` (gateways), `eval/requirements.txt` (client) |
+| `noiseprotocol` | Oak: the Noise NN handshake in the server and the client | `0.3.1` | `baselines/setup_baseline_cvm.sh` (server), `eval/requirements.txt` (client) |
+| `gunicorn` | OHTTP+KMS: the WSGI server of the gateways | `23.0.0` | `baselines/setup_baseline_cvm.sh` |
+
 ## LLM serving (not a source clone)
 
 `apps/llm_app/serve_vllm.py` serves Llama-3.1-8B-Instruct (fp16) directly on **vLLM** behind a `/generate` SSE endpoint. vLLM is a pip package, used through `AsyncLLMEngine`. The H100 run used vLLM 0.22. There is **no Triton**. The model weights and the ShareGPT prompts are data, not code. We do not redistribute them here:

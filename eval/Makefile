@@ -24,6 +24,9 @@ RATLS_PYTHON ?= $(abspath $(dir $(lastword $(MAKEFILE_LIST))))/../baselines/pyth
 # RA+TLS is in the last slot, so a missing RATLS_PYTHON does not block the
 # other protocols.  Override PROTOCOLS to skip a protocol, for example:
 #   make eval PROTOCOLS='vanilla ctls_proxy ctls_redirect httpa'
+# The Oak and OHTTP+KMS baselines are not in the default list. Name them to run
+# them (see baselines/oak/README.md and baselines/ohttp/README.md):
+#   make eval PROTOCOLS='ohttp_kms oak'
 PROTOCOLS := vanilla ctls_proxy ctls_redirect httpa ratls
 
 .PHONY: help print env eval eval-warm eval-cold eval-scale aggregate clean-pyc

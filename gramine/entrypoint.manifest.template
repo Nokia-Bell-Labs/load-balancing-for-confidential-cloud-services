@@ -11,7 +11,9 @@ loader.env.LD_LIBRARY_PATH = "/lib:{{ arch_libdir }}:/usr/{{ arch_libdir }}"
 loader.env.PYTHONPATH = "$PYTHONPATH:{{ python_path|join(':') }}"
 loader.env.TMPDIR = "{{ app_home }}/tmp"
 loader.env.APP_HOME = "{{ app_home }}"
-{% if module_name == 'frontend' %}
+{# ohttp_kms: the OHTTP+KMS baseline runs the frontend code as the KMS and reads
+   OHTTP_ALLOW_ROTATE_API, OHTTP_ROTATION_S and OHTTP_RETENTION_S the same way. #}
+{% if module_name in ('frontend', 'ohttp_kms') %}
 # Backend needs runtime env vars (frontend URL, CVM type, port, IP). Frontend
 # needs deployment config it reads from the environment: JANUS_EXTRA_SANS (cert
 # SANs for the service/backend hostnames browsers dial), ISSUE_DC, and

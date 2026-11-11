@@ -50,6 +50,11 @@ ifeq ($(MODULE_NAME),frontend)
 LOADER_ARGS := "-B,-m,$(subst /,.,$(patsubst /%,%,$(APP_HOME))).janus.frontend.frontend_server"
 endif
 
+# The OHTTP+KMS baseline: the frontend code as an attested KMS (baselines/ohttp/ohttp/kms.py).
+ifeq ($(MODULE_NAME),ohttp_kms)
+LOADER_ARGS := "-B,-m,$(subst /,.,$(patsubst /%,%,$(APP_HOME))).ohttp.kms"
+endif
+
 # Backends run unmodified on SEV-SNP CVMs (the whole VM is the TEE), so they are
 # not graminized — there is no MODULE=backend signed image. The historical
 # SGX-enclave-backend recipe is archived under

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import importlib
 import os
 import json
@@ -53,7 +54,7 @@ for _p in (str(_BENCH_DIR), str(_CODEBASE_DIR)):
 
 from clients._base import MAIN_FIELDS, AttemptResult, JwksCache  # noqa: E402
 
-PROTOCOLS = ("vanilla", "ctls_proxy", "ctls_redirect", "ratls", "httpa")
+PROTOCOLS = ("vanilla", "ctls_proxy", "ctls_redirect", "ratls", "httpa", "ohttp_kms", "oak")
 MODES = ("latency", "scale")
 
 # Extra columns the scale mode adds to MAIN_FIELDS on the per-attempt CSV.
@@ -155,7 +156,9 @@ def _check_phase_sum(result: AttemptResult) -> None:
     """
     if not result.ok or result.total_e2e_ms <= 0:
         return
-    s = result.phase_sum_ms()
+    # Oak's published latency endpoint excludes the trailing application GET.
+    # Do not log an accounting warning for that intentional phase boundary.
+    s = result.establishment_ms() if result.protocol == "oak" else result.phase_sum_ms()
     e2e = result.total_e2e_ms
     tol = max(5.0, 0.10 * e2e)
     if abs(s - e2e) > tol and os.environ.get("JANUS_RUNNER_VERBOSE") == "1":   # a diagnostic of the phase breakdown, off by default
@@ -539,8 +542,20 @@ def _run_scale_step(*, client, target_rate: float, warmup_s: float,
                 job_q.put_nowait(None)
             except queue.Full:
                 break
-        for t in threads:
-            t.join(timeout=2)
+        if getattr(client, "protocol_name", "") in ("oak", "ohttp_kms"):
+            # A two-second join can abandon a worker that was last to receive
+            # work, even after the queue has emptied. For the Oak and OHTTP+KMS
+            # baselines, use one bounded deadline for all in-flight jobs and
+            # keep their real completion times, including late completions.
+            join_deadline = time.perf_counter() + max(120.0, window_s * 4.0)
+            for t in threads:
+                t.join(timeout=max(0.0, join_deadline - time.perf_counter()))
+        else:
+            for t in threads:
+                t.join(timeout=2)
+
+    if getattr(client, "protocol_name", "") in ("oak", "ohttp_kms") and any(t.is_alive() for t in threads):
+        raise RuntimeError("Baseline scale step did not finish draining; refusing a partial rate or overlapping the next step")
 
     successful = [(w, r, t) for (w, r, t) in measured if r.ok]
     failed = [(w, r, t) for (w, r, t) in measured if not r.ok]
@@ -584,8 +599,21 @@ def _run_scale_step(*, client, target_rate: float, warmup_s: float,
         "p95_wait_ms": round(_percentile(waits, 95), 4) if waits else float("nan"),
         "p99_wait_ms": round(_percentile(waits, 99), 4) if waits else float("nan"),
     }
-    # Strip the t_completion from the per-attempt rows; the runner only
-    # writes (wait_ms, result) into the CSV.
+    # Keep the real completion clock for the Oak and OHTTP+KMS baselines.
+    # timestamp_iso is set when the AttemptResult is made, not at completion.
+    # Integer nanoseconds avoid the float rounding of the breakdown serializer.
+    # The other protocols keep their existing fields.
+    if getattr(client, "protocol_name", "") in ("oak", "ohttp_kms"):
+        for _, result, completed in measured:
+            result.breakdown.setdefault("app_status", 0)
+            result.breakdown.setdefault("session_completed", 0)
+            result.breakdown.setdefault("application_ok", 0)
+            result.breakdown.setdefault("success_criterion", getattr(client, "success_criterion", "http_200"))
+            result.breakdown["completion_perf_ns"] = int(completed * 1_000_000_000)
+            result.breakdown["window_start_perf_ns"] = int(t_window_start_actual * 1_000_000_000)
+            result.breakdown["window_end_perf_ns"] = int(window_end_holder[0] * 1_000_000_000)
+    # The runner writes only (wait_ms, result) into the CSV. The completion
+    # clock above stays in the breakdown of the Oak and OHTTP+KMS rows.
     attempts_for_csv = [(w, r) for (w, r, _) in measured]
     return {"attempts": attempts_for_csv, "summary": summary}
 
@@ -595,7 +623,7 @@ def _run_scale_step(*, client, target_rate: float, warmup_s: float,
 # ─────────────────────────────────────────────────────────────────────────
 
 def _common_meta(args, runs, env, run_id, cache_policy, mode) -> dict:
-    return {
+    meta = {
         "schema_version": runs.get("schema_version", 1),
         "run_id": run_id,
         "protocol": args.protocol,
@@ -608,6 +636,30 @@ def _common_meta(args, runs, env, run_id, cache_policy, mode) -> dict:
         "maa_url": env.get("maa", {}).get("url"),
         "payload_path": env.get("payload", {}).get("path"),
     }
+    if args.protocol in ("oak", "ohttp_kms"):
+        # Record the code and the configuration of the two baselines with each run.
+        source_files = [Path(__file__), _BENCH_DIR / "clients" / "_base.py",
+                        _BENCH_DIR / "clients" / f"{args.protocol}.py"]
+        baseline = "oak" if args.protocol == "oak" else "ohttp"
+        source_files.extend(sorted((_CODEBASE_DIR / "baselines" / baseline).rglob("*.py")))
+        source_files.extend(sorted((_CODEBASE_DIR / "janus").glob("*/*.py")))
+        meta.update({
+            "baseline_schema": 1,
+            "protocol_config": env["protocols"][args.protocol],
+            "runs_config": runs,
+            "payload_config": env.get("payload", {}),
+            "evaluation_context": env.get("evaluation_context", {}),
+            "success_criterion": (env["protocols"]["oak"].get("success_criterion", "http_200")
+                                  if args.protocol == "oak" else "http_200"),
+            "runtime_flags": {key: os.environ.get(key) for key in (
+                "OHTTP_ROTATE_ALWAYS", "OHTTP_MOCK_VERIFY", "OAK_MOCK_VERIFY", "MAA_NO_POOL",
+                "EXPECTED_JANUS_MEASUREMENT", "EXPECTED_APP_MEASUREMENT", "EXPECTED_CVM_MEASUREMENT")},
+            "source_sha256": {str(p.relative_to(_CODEBASE_DIR)): hashlib.sha256(p.read_bytes()).hexdigest()
+                              for p in source_files},
+            "throughput_estimator": "(n-1)/(last-first) over qualifying completion times, including drained window-tagged attempts",
+            "completion_clock": "perf_counter seconds converted to integer nanoseconds; process-local",
+        })
+    return meta
 
 
 def main() -> int:

@@ -58,7 +58,7 @@ these checks hold only on a CVM where no one has root access. The testbed in
 | `eval/ae/` | the evaluation scripts: one driver and one script for each table or figure |
 | `eval/` | the measurement scripts and the application benchmarks |
 | `janus/` | the Janus system: frontend (Intel SGX), backends with their TLS terminator (`dc_proxy`), clients (Python, native, Firefox extension) |
-| `baselines/` | the two designs Janus is compared against: RA+TLS and HTTPA/2 |
+| `baselines/` | the designs Janus is compared against: RA+TLS and HTTPA/2, and Oak and OHTTP+KMS (added after the artifact evaluation, see `baselines/README.md`) |
 | `apps/` | the three application workloads (web app, LLM server, microservice application) and the list of every external dependency with its pinned version |
 | `plotting/` | the scripts that draw the figures of the paper from the data of a run |
 | `ca/`, `gramine/` | the certificate authority of the testbed and the SGX packaging of the frontend |

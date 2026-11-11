@@ -96,7 +96,8 @@ RUN apt-get clean \
 
 RUN chown ${app_user}:${app_user} -R /home/${app_user}/tmp \
     && (chown ${app_user}:${app_user} -R /home/${app_user}/janus || true) \
-    && (chown ${app_user}:${app_user} -R /home/${app_user}/ratls || true)
+    && (chown ${app_user}:${app_user} -R /home/${app_user}/ratls || true) \
+    && (chown ${app_user}:${app_user} -R /home/${app_user}/ohttp || true)
 
 USER ${app_user}
 RUN chmod u+x apploader.sh

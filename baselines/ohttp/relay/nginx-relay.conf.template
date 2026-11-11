@@ -1,0 +1,45 @@
+# © 2026 Nokia
+# Licensed under the BSD 3-Clause Clear License
+# SPDX-License-Identifier: BSD-3-Clause-Clear
+
+# OHTTP relay (RFC 9458 "Oblivious Relay Resource") for the OHTTP+KMS baseline: a separately operated
+# TLS-terminating forwarder in front of the service's untrusted load balancer (encapsulated requests)
+# and the KMS (key configuration), so neither learns the client's address. It forwards only these two
+# resources, adds no client information, and keeps warm upstream connections, as production relays do.
+# Rendered by setup_relay.sh; @...@ are placeholders.
+worker_processes auto;
+worker_rlimit_nofile 65536;
+pid @DIR@/nginx.pid;
+error_log @DIR@/error.log warn;
+events { worker_connections 8192; }
+http {
+  access_log off;
+  client_body_temp_path @DIR@/tmp;
+  # nothing about the client may reach the service (RFC 9458 s6.2)
+  proxy_set_header X-Forwarded-For "";
+  proxy_set_header X-Real-IP "";
+  proxy_set_header Forwarded "";
+  proxy_http_version 1.1;
+  proxy_set_header Connection "";
+  proxy_buffering off;            # stream sealed response records (LLM tokens) as they arrive
+  proxy_request_buffering off;
+  proxy_ssl_verify off;           # OHTTP protects the content end to end; hop TLS only hides it from the network
+  proxy_ssl_session_reuse on;
+  proxy_ssl_protocols TLSv1.2 TLSv1.3;
+  keepalive_timeout 75s;
+  keepalive_requests 100000;
+  # Upstream connections stay open across requests and clients. Set explicitly: nginx before 1.19.10
+  # (Ubuntu 22.04 ships 1.18) closes an upstream keep-alive connection after 100 requests, and before
+  # 1.23.4 it offers only TLS 1.2 upstream (one more round trip per new upstream connection).
+  upstream lb  { server @LB_HOST@:@LB_PORT@;   keepalive 256; keepalive_requests 1000000; keepalive_timeout 60s; }
+  upstream kms { server @KMS_HOST@:@KMS_PORT@; keepalive 32;  keepalive_requests 1000000; keepalive_timeout 60s; }
+  server {
+    listen @RELAY_PORT@ ssl;
+    ssl_certificate     @DIR@/relay.crt;
+    ssl_certificate_key @DIR@/relay.key;
+    ssl_protocols TLSv1.3;
+    location = @FORWARD_PATH@ { limit_except POST { deny all; } proxy_pass https://lb; }
+    location = /keyconfig     { limit_except GET  { deny all; } proxy_pass https://kms; }
+    location / { return 404; }
+  }
+}

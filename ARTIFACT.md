@@ -35,6 +35,11 @@ The artifact contains:
 - the raw data behind every number, and
 - the scripts that regenerate every figure and table.
 
+The final version of the paper also compares Janus with Oak and OHTTP+KMS.
+We added the code of these two baselines (`baselines/oak`, `baselines/ohttp`)
+after the artifact evaluation. The artifact evaluation and its badges do not
+cover these two baselines. The scripts in `eval/ae/` do not run them.
+
 ## Badges sought
 
 - **Available**: this public repository, at tag `atc26-ae` (commit
@@ -117,7 +122,7 @@ failed, and the figure leaves it out.
 | `janus/tests/` | offline unit tests |
 | `ca/` | Pebble CA patch (preserve attestation CSR extensions) + fetch/build script |
 | `gramine/` | SGX packaging of the frontend |
-| `baselines/` | RA+TLS (Barkhausen Institut's prototype, pinned + patched) and HTTPA/2 |
+| `baselines/` | RA+TLS (Barkhausen Institut's prototype, pinned + patched) and HTTPA/2. Oak and OHTTP+KMS, added after the artifact evaluation |
 | `apps/` | the three workloads (web app, vLLM server, DeathStarBench fetch script) |
 | `eval/` | measurement scripts: `runner.py`, per-protocol clients, configs, app benches, `ae/` wrappers |
 | `plotting/` | the generators of the three figures and the Table 1 collectors |
