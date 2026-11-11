@@ -144,7 +144,41 @@ serves.
 
 DNS on the client and inside the enclave must resolve the browser names.
 
-## 4. LLM backend (on request)
+## 4. Run the experiments
+
+Run the experiments on the client VM with `eval/ae/ae.py` (see "Running the
+Evaluation" in the main README). Each experiment needs the backend pool in a
+certain state, called a profile. `ae.py -m data` asks a profile service for
+it and waits until the pool is ready. On our testbed the operators run this
+service. On your own testbed, you answer the request yourself:
+
+1. `ae.py` prints the profile it needs, for example
+   `requested profile 'hotel'`.
+2. Set up the pool for that profile (see the table below).
+3. Answer the request:
+
+   ```sh
+   echo "$(cat /tmp/janus-pool-request.$USER) ready" > /tmp/janus-pool-state
+   ```
+
+`ae.py` then checks the pool at the frontend and starts the experiment. It
+waits 20 minutes for the answer. If you need longer, run the same command
+again and answer the new request. It resumes the run.
+
+| Profile | Experiments | Pool |
+| --- | --- | --- |
+| `default` | `table1`, `table3`, `table2` | the backends, registered on `:8443` (the default `PUBLIC_PORT`) |
+| `hotel` | `fig7c` | only the application backend, registered with `PUBLIC_PORT=8543` |
+| `browser` | `fig7a` | only the application backend, registered with `PUBLIC_PORT=8643` |
+| `32` to `1` | `fig6` | N `pool` backends on `:8443` (`FIG6_SIZES` picks the sizes) |
+| `gpu` | `fig7b` | only the H100 CVM (section 5) |
+
+To change the profile, reset the pool (section 2). Then start only the
+backends of the new profile. For example, run
+`PUBLIC_PORT=8543 deploy/backend_setup.sh app` on the application backend,
+with the same `FRONTEND_URL` and `MY_NAME`.
+
+## 5. LLM backend (on request)
 
 The H100 CVM serves Llama-3.1-8B-Instruct with vLLM
 (`apps/llm_app/serve_vllm.py`). You obtain the model and the ShareGPT

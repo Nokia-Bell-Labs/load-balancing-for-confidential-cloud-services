@@ -166,7 +166,9 @@ numbers to expect.
 ### Step 1: Get testbed access
 
 If you built your own testbed with `deploy/`, skip Steps 1 and 2 and run the
-steps of this README on your client VM with `eval/ae/ae.py -m <step>`.
+steps of this README on your client VM with `eval/ae/ae.py -m <step>`. You then
+set the backend pool for each experiment yourself (`deploy/README.md`,
+section 4).
 
 To use a testbed that we provide, please contact the authors with two items:
 
